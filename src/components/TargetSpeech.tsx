@@ -18,15 +18,12 @@ export function TargetSpeech({
 }: Props) {
   const langLabel = targetLangName(direction);
 
-  const play = async () => {
+  const play = () => {
     if (!text.trim()) return;
     onSpeakingChange(true);
     cancelSpeech();
-    const ok = await speakForDirection(text, direction);
-    onSpeakingChange(false);
-    if (!ok) {
-      onSpeakingChange(false);
-    }
+    speakForDirection(text, direction);
+    window.setTimeout(() => onSpeakingChange(false), 400);
   };
 
   return (
@@ -39,7 +36,7 @@ export function TargetSpeech({
       </p>
       <button
         type="button"
-        onClick={() => void play()}
+        onClick={play}
         disabled={speaking}
         aria-label={`Phát âm ${langLabel}`}
         className="flex min-h-11 items-center gap-2 rounded-full border border-zinc-600 bg-zinc-800/80 px-5 py-2.5 text-sm font-medium text-zinc-100 transition hover:border-zinc-500 hover:bg-zinc-700/80 active:scale-[0.98] disabled:opacity-50 touch-manipulation"

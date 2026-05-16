@@ -36,8 +36,9 @@ import { cancelSpeech, prepareVoices, speakForDirection } from "@/lib/tts";
 
 type Status = "idle" | "listening" | "translating" | "speaking";
 
-const SILENCE_MS_JA = 850;
-const SILENCE_MS_VI = 550;
+/** Chờ text ổn định trước khi dịch partial (ms) */
+const INTERIM_STABLE_MS = 160;
+const INTERIM_MIN_CHARS = 2;
 
 function recognitionLang(mode: DirectionMode, detected: Direction | null): string {
   if (mode === "vi-ja") return sourceLang("vi-ja");
@@ -45,8 +46,8 @@ function recognitionLang(mode: DirectionMode, detected: Direction | null): strin
   return sourceLang(detected ?? "vi-ja");
 }
 
-function silenceMsFor(direction: Direction): number {
-  return direction === "ja-vi" ? SILENCE_MS_JA : SILENCE_MS_VI;
+function minCharsFor(direction: Direction): number {
+  return direction === "ja-vi" ? 1 : INTERIM_MIN_CHARS;
 }
 
 function isListeningJapanese(
@@ -95,6 +96,8 @@ export function TranslatorApp() {
   const audioSettingsRef = useRef(audioSettings);
   const headphonesRef = useRef(headphonesConnected);
   const prevHeadphonesRef = useRef(false);
+  const translateGenRef = useRef(0);
+  const lastSpokenTranslationRef = useRef("");
 
   modeRef.current = mode;
   detectedRef.current = detectedDirection;
@@ -155,7 +158,7 @@ export function TranslatorApp() {
   );
 
   const playTranslation = useCallback(
-    async (translated: string, direction: Direction) => {
+    (translated: string, direction: Direction) => {
       if (
         !shouldAutoPlaySpeech(
           audioSettingsRef.current.playbackMode,
@@ -164,56 +167,76 @@ export function TranslatorApp() {
       ) {
         return;
       }
+      if (translated === lastSpokenTranslationRef.current) return;
+
+      lastSpokenTranslationRef.current = translated;
       setStatus("speaking");
       cancelSpeech();
-      prepareVoices();
-      await speakForDirection(translated, direction);
+      speakForDirection(translated, direction);
     },
     [],
   );
 
-  const runTranslation = useCallback(async (sourceText: string) => {
-    const trimmed = sourceText.trim();
-    if (!trimmed) return;
+  const runTranslation = useCallback(
+    async (sourceText: string, opts?: { final?: boolean }) => {
+      const trimmed = sourceText.trim();
+      if (trimmed.length < minCharsFor(resolveDirection(modeRef.current, trimmed))) {
+        return;
+      }
 
-    const direction = resolveDirection(modeRef.current, trimmed);
-    setDetectedDirection(direction);
+      const direction = resolveDirection(modeRef.current, trimmed);
+      setDetectedDirection(direction);
 
-    const dedupeKey = `${direction}:${trimmed}`;
-    if (dedupeKey === `${lastTranslatedDirRef.current}:${lastTranslatedRef.current}`) {
-      return;
-    }
+      const dedupeKey = `${direction}:${trimmed}`;
+      if (
+        !opts?.final &&
+        dedupeKey === `${lastTranslatedDirRef.current}:${lastTranslatedRef.current}`
+      ) {
+        return;
+      }
 
-    setStatus("translating");
-    setError(null);
+      const gen = ++translateGenRef.current;
+      setStatus("translating");
+      setError(null);
 
-    try {
-      const translated = await translateText(trimmed, direction);
-      if (!translated) return;
+      try {
+        const translated = await translateText(trimmed, direction);
+        if (gen !== translateGenRef.current || !translated) return;
 
-      lastTranslatedRef.current = trimmed;
-      lastTranslatedDirRef.current = direction;
-      setLastSpeakDirection(direction);
-      setLastTranslation(translated);
-      await playTranslation(translated, direction);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Không dịch được");
-    } finally {
-      if (listeningRef.current) setStatus("listening");
-      else setStatus("idle");
-    }
-  }, [playTranslation]);
+        lastTranslatedRef.current = trimmed;
+        lastTranslatedDirRef.current = direction;
+        setLastSpeakDirection(direction);
+        setLastTranslation(translated);
+
+        playTranslation(translated, direction);
+
+        if (listeningRef.current) {
+          setStatus(
+            shouldAutoPlaySpeech(
+              audioSettingsRef.current.playbackMode,
+              headphonesRef.current,
+            )
+              ? "speaking"
+              : "listening",
+          );
+        }
+      } catch (e) {
+        if (gen !== translateGenRef.current) return;
+        setError(e instanceof Error ? e.message : "Không dịch được");
+        if (listeningRef.current) setStatus("listening");
+      }
+    },
+    [playTranslation],
+  );
 
   const scheduleTranslation = useCallback(
     (text: string, isFinal: boolean) => {
       maybeSwitchAutoLang(text);
-      const direction = resolveDirection(modeRef.current, text);
-      const silenceMs = silenceMsFor(direction);
 
       if (debounceRef.current) clearTimeout(debounceRef.current);
 
       if (isFinal) {
-        void runTranslation(text);
+        void runTranslation(text, { final: true });
         stableTextRef.current = "";
         return;
       }
@@ -227,16 +250,10 @@ export function TranslatorApp() {
       debounceRef.current = setTimeout(() => {
         const stableFor = Date.now() - stableSinceRef.current;
         const stable = stableTextRef.current.trim();
-        const dir = resolveDirection(modeRef.current, stable);
-        const key = `${dir}:${stable}`;
-        if (
-          stable &&
-          stableFor >= silenceMs &&
-          key !== `${lastTranslatedDirRef.current}:${lastTranslatedRef.current}`
-        ) {
+        if (stableFor >= INTERIM_STABLE_MS && stable.length >= INTERIM_MIN_CHARS) {
           void runTranslation(stable);
         }
-      }, silenceMs);
+      }, INTERIM_STABLE_MS);
     },
     [maybeSwitchAutoLang, runTranslation],
   );
@@ -364,6 +381,8 @@ export function TranslatorApp() {
       setError(null);
       lastTranslatedRef.current = "";
       lastTranslatedDirRef.current = null;
+      lastSpokenTranslationRef.current = "";
+      translateGenRef.current = 0;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không bật được micro");
       stopListening();
@@ -380,6 +399,7 @@ export function TranslatorApp() {
     setLastTranslation("");
     lastTranslatedRef.current = "";
     lastTranslatedDirRef.current = null;
+    lastSpokenTranslationRef.current = "";
     startRecognition();
   }, [listening, startRecognition, stopListening]);
 
@@ -433,8 +453,8 @@ export function TranslatorApp() {
         void (async () => {
           setStatus("speaking");
           cancelSpeech();
-          await speakForDirection(text, dir);
-          if (listeningRef.current) setStatus("listening");
+          speakForDirection(text, dir);
+          if (listeningRef.current) setStatus("speaking");
           else setStatus("idle");
         })();
       }
@@ -456,7 +476,7 @@ export function TranslatorApp() {
         lastTranslation &&
         lastTranslatedDirRef.current
       ) {
-        void playTranslation(lastTranslation, lastTranslatedDirRef.current);
+        playTranslation(lastTranslation, lastTranslatedDirRef.current);
       }
 
       if (listeningRef.current) {
@@ -587,7 +607,7 @@ export function TranslatorApp() {
               : audioSettings.playbackMode === "headphones" &&
                   !headphonesConnected
                 ? "Cắm tai nghe hoặc chỉnh trong Cài đặt"
-                : "Bản dịch tự phát âm · Cài đặt để chỉnh âm lượng & lọc ồn"}
+                : "Dịch & phát âm tức thời khi bạn nói"}
           </p>
         )}
       </main>

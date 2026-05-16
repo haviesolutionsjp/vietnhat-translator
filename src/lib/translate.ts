@@ -5,6 +5,24 @@ import {
 } from "@/lib/lang";
 
 const translatorCache = new Map<Direction, TranslatorInstance>();
+const resultCache = new Map<string, string>();
+const MAX_CACHE = 80;
+
+const CHROME_TIMEOUT_MS = 700;
+
+function cacheKey(direction: Direction, text: string): string {
+  return `${direction}\0${text}`;
+}
+
+function remember(direction: Direction, source: string, translated: string): string {
+  const key = cacheKey(direction, source);
+  if (resultCache.size >= MAX_CACHE) {
+    const first = resultCache.keys().next().value;
+    if (first) resultCache.delete(first);
+  }
+  resultCache.set(key, translated);
+  return translated;
+}
 
 async function getChromeTranslator(
   direction: Direction,
@@ -34,6 +52,19 @@ async function getChromeTranslator(
   }
 }
 
+async function translateChrome(
+  text: string,
+  direction: Direction,
+): Promise<string | null> {
+  const chrome = await getChromeTranslator(direction);
+  if (!chrome) return null;
+  try {
+    return (await chrome.translate(text)).trim();
+  } catch {
+    return null;
+  }
+}
+
 async function translateMyMemory(
   text: string,
   direction: Direction,
@@ -44,7 +75,7 @@ async function translateMyMemory(
   url.searchParams.set("langpair", pair);
 
   const res = await fetch(url.toString(), {
-    signal: AbortSignal.timeout(12_000),
+    signal: AbortSignal.timeout(8_000),
   });
   if (!res.ok) throw new Error("Dịch thất bại");
   const data = (await res.json()) as {
@@ -62,16 +93,30 @@ export async function translateText(
   const trimmed = text.trim();
   if (!trimmed) return "";
 
-  const chrome = await getChromeTranslator(direction);
-  if (chrome) {
-    try {
-      return (await chrome.translate(trimmed)).trim();
-    } catch {
-      /* fallback */
-    }
+  const hit = resultCache.get(cacheKey(direction, trimmed));
+  if (hit) return hit;
+
+  const chromeFast = translateChrome(trimmed, direction);
+  const chromeResult = await Promise.race([
+    chromeFast,
+    new Promise<null>((resolve) =>
+      window.setTimeout(() => resolve(null), CHROME_TIMEOUT_MS),
+    ),
+  ]);
+
+  if (chromeResult) {
+    return remember(direction, trimmed, chromeResult);
   }
 
-  return translateMyMemory(trimmed, direction);
+  const pending = chromeFast.catch(() => null);
+  const myMemory = translateMyMemory(trimmed, direction);
+
+  const [lateChrome, mm] = await Promise.all([pending, myMemory]);
+  if (lateChrome) {
+    return remember(direction, trimmed, lateChrome);
+  }
+
+  return remember(direction, trimmed, mm);
 }
 
 /** Khởi tạo sẵn cả hai chiều (Chrome Translator) */
@@ -87,4 +132,5 @@ export function resetTranslatorCache(): void {
     instance.destroy();
   }
   translatorCache.clear();
+  resultCache.clear();
 }

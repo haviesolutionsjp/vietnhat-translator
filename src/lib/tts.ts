@@ -3,13 +3,13 @@ import type { Direction } from "@/lib/lang";
 import { targetLang } from "@/lib/lang";
 
 let voicesReady: Promise<SpeechSynthesisVoice[]> | null = null;
+const voicePickCache = new Map<string, SpeechSynthesisVoice | undefined>();
 let speakGeneration = 0;
 
 export function isTTSSupported(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window;
 }
 
-/** Gọi sau thao tác người dùng (bấm Nói) để tải giọng trên mobile */
 export function prepareVoices(): void {
   if (!isTTSSupported()) return;
   speechSynthesis.getVoices();
@@ -27,7 +27,7 @@ function loadVoices(): Promise<SpeechSynthesisVoice[]> {
     };
     pick();
     speechSynthesis.onvoiceschanged = pick;
-    setTimeout(() => resolve(speechSynthesis.getVoices()), 800);
+    setTimeout(() => resolve(speechSynthesis.getVoices()), 400);
   });
 
   return voicesReady;
@@ -60,80 +60,75 @@ function pickVoice(
   voices: SpeechSynthesisVoice[],
   langCode: string,
 ): SpeechSynthesisVoice | undefined {
+  const cached = voicePickCache.get(langCode);
+  if (cached !== undefined) return cached;
+
   if (voices.length === 0) return undefined;
 
-  return [...voices].sort(
+  const best = [...voices].sort(
     (a, b) => scoreVoice(b, langCode) - scoreVoice(a, langCode),
   )[0];
+  voicePickCache.set(langCode, best);
+  return best;
 }
 
-/** Phát âm văn bản ngôn ngữ đích (ja-JP / vi-VN) */
-export async function speakTranslation(
+function applyUtteranceSettings(
+  utterance: SpeechSynthesisUtterance,
+  langCode: string,
+  voice?: SpeechSynthesisVoice,
+): void {
+  utterance.lang = langCode;
+  if (voice) utterance.voice = voice;
+
+  const audio = getAudioSettings();
+  const isJa = langCode.toLowerCase().startsWith("ja");
+
+  utterance.volume = audio.ttsVolume;
+  if (isJa && audio.jaClarityBoost) {
+    utterance.rate = 0.92;
+    utterance.pitch = 1.05;
+  } else {
+    utterance.rate = isJa ? 0.97 : 1;
+    utterance.pitch = 1;
+  }
+}
+
+/** Phát âm ngay — không chờ hết câu đọc để cập nhật UI */
+export function speakTranslation(
   text: string,
   langCode: string,
-): Promise<boolean> {
+): boolean {
   const trimmed = text.trim();
   if (!trimmed || !isTTSSupported()) return false;
 
   const gen = ++speakGeneration;
   speechSynthesis.cancel();
-
   if (speechSynthesis.paused) speechSynthesis.resume();
 
-  const voices = await loadVoices();
-  if (gen !== speakGeneration) return false;
+  const startSpeak = (voices: SpeechSynthesisVoice[]) => {
+    if (gen !== speakGeneration) return;
 
-  return new Promise((resolve) => {
     const utterance = new SpeechSynthesisUtterance(trimmed);
-    utterance.lang = langCode;
-    const voice = pickVoice(voices, langCode);
-    if (voice) utterance.voice = voice;
+    applyUtteranceSettings(utterance, langCode, pickVoice(voices, langCode));
 
-    const audio = getAudioSettings();
-    const isJa = langCode.toLowerCase().startsWith("ja");
-
-    utterance.volume = audio.ttsVolume;
-    if (isJa && audio.jaClarityBoost) {
-      utterance.rate = 0.88;
-      utterance.pitch = 1.06;
-    } else {
-      utterance.rate = isJa ? 0.95 : 1;
-      utterance.pitch = 1;
-    }
-
-    let settled = false;
-    const finish = (ok: boolean) => {
-      if (settled || gen !== speakGeneration) return;
-      settled = true;
-      resolve(ok);
+    utterance.onerror = () => {
+      /* bỏ qua — có thể bị cancel bởi câu mới */
     };
 
-    utterance.onstart = () => finish(true);
-    utterance.onend = () => finish(true);
-    utterance.onerror = () => finish(false);
-
     speechSynthesis.speak(utterance);
+  };
 
-    // Một số trình duyệt không kích hoạt onstart nếu bị chặn autoplay
-    window.setTimeout(() => {
-      if (settled || gen !== speakGeneration) return;
-      if (speechSynthesis.speaking || speechSynthesis.pending) {
-        finish(true);
-      }
-    }, 300);
+  const cached = speechSynthesis.getVoices();
+  if (cached.length > 0) {
+    startSpeak(cached);
+    return true;
+  }
 
-    window.setTimeout(() => {
-      if (!settled && gen === speakGeneration && !speechSynthesis.speaking) {
-        finish(false);
-      }
-    }, 1200);
-  });
+  void loadVoices().then((voices) => startSpeak(voices));
+  return true;
 }
 
-export async function speakForDirection(
-  text: string,
-  direction: Direction,
-): Promise<boolean> {
+export function speakForDirection(text: string, direction: Direction): boolean {
   return speakTranslation(text, targetLang(direction));
 }
 
