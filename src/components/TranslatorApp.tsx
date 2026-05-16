@@ -2,10 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DirectionPicker } from "@/components/DirectionPicker";
-import { SettingsPanel } from "@/components/SettingsPanel";
+import { SettingsSheet } from "@/components/SettingsSheet";
 import { TargetSpeech } from "@/components/TargetSpeech";
 import { useAudioOutput } from "@/hooks/useAudioOutput";
-import { useIsClient } from "@/hooks/useIsClient";
 import {
   listenHint,
   resolveDirection,
@@ -31,7 +30,7 @@ import {
   saveAudioSettings,
   type AudioSettings,
 } from "@/lib/audioSettings";
-import { startMicSession, type MicSession } from "@/lib/micEnhance";
+import { startMicEnhancer, stopMicEnhancer } from "@/lib/micSession";
 import { shouldAutoPlaySpeech } from "@/lib/speechPlayback";
 import { cancelSpeech, prepareVoices, speakForDirection } from "@/lib/tts";
 
@@ -50,6 +49,15 @@ function silenceMsFor(direction: Direction): number {
   return direction === "ja-vi" ? SILENCE_MS_JA : SILENCE_MS_VI;
 }
 
+function isListeningJapanese(
+  mode: DirectionMode,
+  detected: Direction | null,
+): boolean {
+  if (mode === "ja-vi") return true;
+  if (mode === "vi-ja") return false;
+  return detected === "ja-vi";
+}
+
 export function TranslatorApp() {
   const [mode, setMode] = useState<DirectionMode>("vi-ja");
   const [detectedDirection, setDetectedDirection] = useState<Direction | null>(
@@ -59,15 +67,13 @@ export function TranslatorApp() {
   const [status, setStatus] = useState<Status>("idle");
   const [lastTranslation, setLastTranslation] = useState("");
   const [lastSpeakDirection, setLastSpeakDirection] = useState<Direction>("vi-ja");
-  const [audioSettings, setAudioSettings] = useState<AudioSettings>(() =>
-    typeof window !== "undefined"
-      ? loadAudioSettings()
-      : DEFAULT_AUDIO_SETTINGS,
+  const [audioSettings, setAudioSettings] = useState<AudioSettings>(
+    DEFAULT_AUDIO_SETTINGS,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const isClient = useIsClient();
-  const speechSupported = isSpeechRecognitionSupported();
+  const [mounted, setMounted] = useState(false);
+  const [supported, setSupported] = useState(false);
 
   const {
     headphonesConnected,
@@ -89,15 +95,12 @@ export function TranslatorApp() {
   const audioSettingsRef = useRef(audioSettings);
   const headphonesRef = useRef(headphonesConnected);
   const prevHeadphonesRef = useRef(false);
-  const micSessionRef = useRef<MicSession | null>(null);
 
-  useEffect(() => {
-    modeRef.current = mode;
-    detectedRef.current = detectedDirection;
-    listeningRef.current = listening;
-    audioSettingsRef.current = audioSettings;
-    headphonesRef.current = headphonesConnected;
-  }, [mode, detectedDirection, listening, audioSettings, headphonesConnected]);
+  modeRef.current = mode;
+  detectedRef.current = detectedDirection;
+  listeningRef.current = listening;
+  audioSettingsRef.current = audioSettings;
+  headphonesRef.current = headphonesConnected;
 
   const stopListening = useCallback(() => {
     listeningRef.current = false;
@@ -106,10 +109,9 @@ export function TranslatorApp() {
     networkRetriesRef.current = 0;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
-    micSessionRef.current?.cleanup();
-    micSessionRef.current = null;
     recognitionRef.current?.abort();
     recognitionRef.current = null;
+    stopMicEnhancer();
   }, []);
 
   const scheduleRecognitionRestart = useCallback((delayMs: number) => {
@@ -119,15 +121,7 @@ export function TranslatorApp() {
       try {
         recognitionRef.current.start();
       } catch {
-        const retryMs = Math.min(delayMs * 2, 3000);
-        restartTimeoutRef.current = setTimeout(() => {
-          if (!listeningRef.current || !recognitionRef.current) return;
-          try {
-            recognitionRef.current.start();
-          } catch {
-            /* chờ onend thử lại */
-          }
-        }, retryMs);
+        scheduleRecognitionRestart(Math.min(delayMs * 2, 3000));
       }
     }, delayMs);
   }, []);
@@ -173,11 +167,7 @@ export function TranslatorApp() {
       setStatus("speaking");
       cancelSpeech();
       prepareVoices();
-      await speakForDirection(
-        translated,
-        direction,
-        audioSettingsRef.current,
-      );
+      await speakForDirection(translated, direction);
     },
     [],
   );
@@ -325,8 +315,9 @@ export function TranslatorApp() {
     [scheduleRecognitionRestart, scheduleTranslation, stopListening],
   );
 
-  const startRecognition = useCallback(async () => {
-    if (!speechSupported) {
+  const startRecognition = useCallback(() => {
+    if (!isSpeechRecognitionSupported()) {
+      setSupported(false);
       setError("Dùng Chrome trên Android để nhận dạng giọng nói.");
       return;
     }
@@ -340,9 +331,6 @@ export function TranslatorApp() {
 
     try {
       networkRetriesRef.current = 0;
-      micSessionRef.current?.cleanup();
-      micSessionRef.current = await startMicSession(audioSettingsRef.current);
-
       const initialDetected =
         modeRef.current === "ja-vi"
           ? "ja-vi"
@@ -365,6 +353,9 @@ export function TranslatorApp() {
       recognitionRef.current = recognition;
       bindRecognitionHandlers(recognition);
 
+      void startMicEnhancer(
+        isListeningJapanese(modeRef.current, initialDetected),
+      );
       recognition.start();
       void refreshAudioOutput();
       setListening(true);
@@ -374,12 +365,10 @@ export function TranslatorApp() {
       lastTranslatedRef.current = "";
       lastTranslatedDirRef.current = null;
     } catch (e) {
-      micSessionRef.current?.cleanup();
-      micSessionRef.current = null;
       setError(e instanceof Error ? e.message : "Không bật được micro");
       stopListening();
     }
-  }, [bindRecognitionHandlers, refreshAudioOutput, speechSupported, stopListening]);
+  }, [bindRecognitionHandlers, refreshAudioOutput, stopListening]);
 
   const toggleListening = useCallback(() => {
     if (listening) {
@@ -418,6 +407,10 @@ export function TranslatorApp() {
   );
 
   useEffect(() => {
+    setMounted(true);
+    const loaded = loadAudioSettings();
+    setAudioSettings(loaded);
+    setSupported(isSpeechRecognitionSupported());
     prepareVoices();
     void warmTranslators();
   }, []);
@@ -440,7 +433,7 @@ export function TranslatorApp() {
         void (async () => {
           setStatus("speaking");
           cancelSpeech();
-          await speakForDirection(text, dir, audioSettingsRef.current);
+          await speakForDirection(text, dir);
           if (listeningRef.current) setStatus("listening");
           else setStatus("idle");
         })();
@@ -450,18 +443,26 @@ export function TranslatorApp() {
 
   const handleSettingsChange = useCallback(
     (next: AudioSettings) => {
-      audioSettingsRef.current = next;
-      setAudioSettings(next);
+      const prev = audioSettingsRef.current;
       saveAudioSettings(next);
+      setAudioSettings(next);
+      audioSettingsRef.current = next;
 
       if (next.playbackMode === "off") cancelSpeech();
 
       if (
         next.playbackMode === "on" &&
+        prev.playbackMode !== "on" &&
         lastTranslation &&
         lastTranslatedDirRef.current
       ) {
         void playTranslation(lastTranslation, lastTranslatedDirRef.current);
+      }
+
+      if (listeningRef.current) {
+        void startMicEnhancer(
+          isListeningJapanese(modeRef.current, detectedRef.current),
+        );
       }
     },
     [lastTranslation, playTranslation],
@@ -516,10 +517,11 @@ export function TranslatorApp() {
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            className="flex min-h-10 min-w-10 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900/80 text-zinc-300 transition hover:border-zinc-500 hover:text-white"
+            className="flex min-h-10 items-center gap-1.5 rounded-full border border-zinc-700 bg-zinc-900/80 px-3 py-2 text-sm text-zinc-300 transition hover:border-zinc-500 active:scale-[0.98]"
             aria-label="Cài đặt âm thanh"
           >
             <GearIcon />
+            Cài đặt
           </button>
         </div>
         <DirectionPicker
@@ -529,12 +531,12 @@ export function TranslatorApp() {
         />
       </header>
 
-      <SettingsPanel
+      <SettingsSheet
         open={settingsOpen}
         settings={audioSettings}
         headphonesConnected={headphonesConnected}
-        onClose={() => setSettingsOpen(false)}
         onChange={handleSettingsChange}
+        onClose={() => setSettingsOpen(false)}
       />
 
       <main className="relative z-0 flex min-h-0 flex-1 flex-col items-center justify-center gap-8">
@@ -548,7 +550,7 @@ export function TranslatorApp() {
         <button
           type="button"
           onClick={toggleListening}
-          disabled={isClient && !speechSupported}
+          disabled={mounted && !supported}
           aria-pressed={listening}
           aria-label={listening ? "Tắt nghe" : "Bật nghe và dịch"}
           className={`relative flex h-40 w-40 items-center justify-center rounded-full text-xl font-semibold shadow-lg transition-all active:scale-95 disabled:opacity-40 ${
@@ -571,7 +573,6 @@ export function TranslatorApp() {
           <TargetSpeech
             text={lastTranslation}
             direction={lastSpeakDirection}
-            settings={audioSettings}
             speaking={status === "speaking"}
             onSpeakingChange={(speaking) => {
               if (speaking) setStatus("speaking");
@@ -582,10 +583,10 @@ export function TranslatorApp() {
         ) : (
           <p className="max-w-xs text-center text-xs text-zinc-600">
             {audioSettings.playbackMode === "off"
-              ? "Phát âm tắt — mở Cài đặt hoặc bấm Nghe"
+              ? "Phát âm tắt — bấm Nghe hoặc mở Cài đặt"
               : audioSettings.playbackMode === "headphones" &&
                   !headphonesConnected
-                ? "Cắm tai nghe hoặc mở Cài đặt để tự phát âm"
+                ? "Cắm tai nghe hoặc chỉnh trong Cài đặt"
                 : "Bản dịch tự phát âm · Cài đặt để chỉnh âm lượng & lọc ồn"}
           </p>
         )}
@@ -595,30 +596,12 @@ export function TranslatorApp() {
         <p className="max-w-md text-center text-sm text-amber-400/90" role="alert">
           {error}
         </p>
-      ) : isClient && !speechSupported ? (
+      ) : mounted && !supported ? (
         <p className="max-w-md text-center text-sm text-amber-400/90">
           Cần Chrome hoặc Edge trên điện thoại Android để dùng micro.
         </p>
       ) : null}
     </div>
-  );
-}
-
-function GearIcon() {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      className="h-5 w-5"
-      aria-hidden
-    >
-      <path
-        fillRule="evenodd"
-        d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l1.17 1.012c.11.095.178.27.154.43a7.598 7.598 0 0 0 0 1.139c.024.16-.044.335-.154.43l-1.17 1.012a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.116-.043.284-.031.45.082.312.214.641.405.986.57.182.088.277.228.297.348l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.345-.165.674-.356.986-.57.166-.114.334-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.818l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-1.17-1.012c-.11-.095-.178-.27-.154-.43a7.598 7.598 0 0 0 0-1.139c-.024-.16.044-.335.154-.43l1.17-1.012a1.875 1.875 0 0 0 .432-2.385l-.923-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.116.043-.284.031-.45-.082a7.503 7.503 0 0 0-.986-.57c-.183-.087-.277-.227-.297-.348l-.178-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z"
-        clipRule="evenodd"
-      />
-    </svg>
   );
 }
 
@@ -628,5 +611,23 @@ function MicPulse() {
       <span className="absolute h-8 w-8 animate-ping rounded-full bg-white/20" />
       <span className="relative h-2 w-2 rounded-full bg-white" />
     </span>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      className="h-4 w-4 text-zinc-400"
+      aria-hidden
+    >
+      <path
+        fillRule="evenodd"
+        d="M8.34 1.804A1 1 0 0 1 9.32 1h1.36a1 1 0 0 1 .98.804l.295 1.473c.5.12.98.29 1.435.507l1.36-.977a1 1 0 0 1 1.25.125l.962.962a1 1 0 0 1 .125 1.25l-.977 1.36c.217.455.387.935.507 1.435l1.473.295A1 1 0 0 1 19 10.68v1.36a1 1 0 0 1-.804.98l-1.473.295a6.77 6.77 0 0 1-.507 1.435l.977 1.36a1 1 0 0 1-.125 1.25l-.962.962a1 1 0 0 1-1.25.125l-1.36-.977c-.455.217-.935.387-1.435.507l-.295 1.473a1 1 0 0 1-.98.804H9.32a1 1 0 0 1-.98-.804l-.295-1.473a6.77 6.77 0 0 1-1.435-.507l-1.36.977a1 1 0 0 1-1.25-.125l-.962-.962a1 1 0 0 1-.125-1.25l.977-1.36a6.77 6.77 0 0 1-.507-1.435L1.804 11.66A1 1 0 0 1 1 10.68V9.32a1 1 0 0 1 .804-.98l1.473-.295c.12-.5.29-.98.507-1.435l-.977-1.36a1 1 0 0 1 .125-1.25l.962-.962a1 1 0 0 1 1.25-.125l1.36.977c.455-.217.935-.387 1.435-.507l.295-1.473ZM10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z"
+        clipRule="evenodd"
+      />
+    </svg>
   );
 }

@@ -1,5 +1,4 @@
-import type { AudioSettings } from "@/lib/audioSettings";
-import { ttsParamsFromSettings } from "@/lib/audioSettings";
+import { getAudioSettings } from "@/lib/audioSettings";
 import type { Direction } from "@/lib/lang";
 import { targetLang } from "@/lib/lang";
 
@@ -10,6 +9,7 @@ export function isTTSSupported(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window;
 }
 
+/** Gọi sau thao tác người dùng (bấm Nói) để tải giọng trên mobile */
 export function prepareVoices(): void {
   if (!isTTSSupported()) return;
   speechSynthesis.getVoices();
@@ -33,11 +33,7 @@ function loadVoices(): Promise<SpeechSynthesisVoice[]> {
   return voicesReady;
 }
 
-function scoreVoice(
-  voice: SpeechSynthesisVoice,
-  langCode: string,
-  japaneseClarity: boolean,
-): number {
+function scoreVoice(voice: SpeechSynthesisVoice, langCode: string): number {
   const lang = voice.lang.toLowerCase();
   const want = langCode.toLowerCase();
   let score = 0;
@@ -51,7 +47,7 @@ function scoreVoice(
 
   const name = voice.name.toLowerCase();
   if (want.startsWith("ja") && /japan|ja-|kyoko|haruka|otoya|google/.test(name)) {
-    score += japaneseClarity ? 25 : 15;
+    score += 15;
   }
   if (want.startsWith("vi") && /viet|vi-|lan|female|male/.test(name)) {
     score += 15;
@@ -63,41 +59,47 @@ function scoreVoice(
 function pickVoice(
   voices: SpeechSynthesisVoice[],
   langCode: string,
-  japaneseClarity: boolean,
 ): SpeechSynthesisVoice | undefined {
   if (voices.length === 0) return undefined;
+
   return [...voices].sort(
-    (a, b) =>
-      scoreVoice(b, langCode, japaneseClarity) -
-      scoreVoice(a, langCode, japaneseClarity),
+    (a, b) => scoreVoice(b, langCode) - scoreVoice(a, langCode),
   )[0];
 }
 
+/** Phát âm văn bản ngôn ngữ đích (ja-JP / vi-VN) */
 export async function speakTranslation(
   text: string,
   langCode: string,
-  settings: AudioSettings,
 ): Promise<boolean> {
   const trimmed = text.trim();
   if (!trimmed || !isTTSSupported()) return false;
 
   const gen = ++speakGeneration;
   speechSynthesis.cancel();
+
   if (speechSynthesis.paused) speechSynthesis.resume();
 
   const voices = await loadVoices();
   if (gen !== speakGeneration) return false;
 
-  const { volume, rate, pitch } = ttsParamsFromSettings(settings, langCode);
-
   return new Promise((resolve) => {
     const utterance = new SpeechSynthesisUtterance(trimmed);
     utterance.lang = langCode;
-    const voice = pickVoice(voices, langCode, settings.japaneseClarity);
+    const voice = pickVoice(voices, langCode);
     if (voice) utterance.voice = voice;
-    utterance.rate = rate;
-    utterance.pitch = pitch;
-    utterance.volume = volume;
+
+    const audio = getAudioSettings();
+    const isJa = langCode.toLowerCase().startsWith("ja");
+
+    utterance.volume = audio.ttsVolume;
+    if (isJa && audio.jaClarityBoost) {
+      utterance.rate = 0.88;
+      utterance.pitch = 1.06;
+    } else {
+      utterance.rate = isJa ? 0.95 : 1;
+      utterance.pitch = 1;
+    }
 
     let settled = false;
     const finish = (ok: boolean) => {
@@ -112,9 +114,12 @@ export async function speakTranslation(
 
     speechSynthesis.speak(utterance);
 
+    // Một số trình duyệt không kích hoạt onstart nếu bị chặn autoplay
     window.setTimeout(() => {
       if (settled || gen !== speakGeneration) return;
-      if (speechSynthesis.speaking || speechSynthesis.pending) finish(true);
+      if (speechSynthesis.speaking || speechSynthesis.pending) {
+        finish(true);
+      }
     }, 300);
 
     window.setTimeout(() => {
@@ -128,9 +133,8 @@ export async function speakTranslation(
 export async function speakForDirection(
   text: string,
   direction: Direction,
-  settings: AudioSettings,
 ): Promise<boolean> {
-  return speakTranslation(text, targetLang(direction), settings);
+  return speakTranslation(text, targetLang(direction));
 }
 
 export function cancelSpeech(): void {

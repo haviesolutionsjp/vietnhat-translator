@@ -1,13 +1,11 @@
 "use client";
 
-import type { AudioSettings } from "@/lib/audioSettings";
 import { targetLangName, type Direction } from "@/lib/lang";
 import { cancelSpeech, speakForDirection } from "@/lib/tts";
 
 type Props = {
   text: string;
   direction: Direction;
-  settings: AudioSettings;
   speaking: boolean;
   onSpeakingChange: (speaking: boolean) => void;
 };
@@ -15,7 +13,6 @@ type Props = {
 export function TargetSpeech({
   text,
   direction,
-  settings,
   speaking,
   onSpeakingChange,
 }: Props) {
@@ -25,8 +22,11 @@ export function TargetSpeech({
     if (!text.trim()) return;
     onSpeakingChange(true);
     cancelSpeech();
-    await speakForDirection(text, direction, settings);
+    const ok = await speakForDirection(text, direction);
     onSpeakingChange(false);
+    if (!ok) {
+      onSpeakingChange(false);
+    }
   };
 
   return (

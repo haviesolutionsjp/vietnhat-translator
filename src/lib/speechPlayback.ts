@@ -1,26 +1,25 @@
-export type SpeechPlaybackMode = "headphones" | "on" | "off";
+import {
+  getAudioSettings,
+  loadAudioSettings,
+  saveAudioSettings,
+} from "@/lib/audioSettings";
+import type { SpeechPlaybackMode } from "@/lib/audioSettings";
 
-const STORAGE_KEY = "vietnhat-speech-playback";
+export type { SpeechPlaybackMode };
 
-export const SPEECH_PLAYBACK_OPTIONS: {
-  mode: SpeechPlaybackMode;
-  label: string;
-  short: string;
-}[] = [
-  { mode: "headphones", label: "Tự động (tai nghe)", short: "Tai nghe" },
-  { mode: "on", label: "Luôn phát", short: "Bật" },
-  { mode: "off", label: "Không tự phát", short: "Tắt" },
+export const SPEECH_PLAYBACK_OPTIONS = [
+  { mode: "headphones" as const, label: "Tự động (tai nghe)", short: "Tai nghe" },
+  { mode: "on" as const, label: "Luôn phát", short: "Bật" },
+  { mode: "off" as const, label: "Không tự phát", short: "Tắt" },
 ];
 
 export function loadSpeechPlaybackMode(): SpeechPlaybackMode {
-  if (typeof window === "undefined") return "headphones";
-  const saved = localStorage.getItem(STORAGE_KEY);
-  if (saved === "headphones" || saved === "on" || saved === "off") return saved;
-  return "headphones";
+  return loadAudioSettings().playbackMode;
 }
 
 export function saveSpeechPlaybackMode(mode: SpeechPlaybackMode): void {
-  localStorage.setItem(STORAGE_KEY, mode);
+  const s = getAudioSettings();
+  saveAudioSettings({ ...s, playbackMode: mode });
 }
 
 export function shouldAutoPlaySpeech(

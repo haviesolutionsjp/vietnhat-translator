@@ -1,12 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { detectHeadphonesConnected } from "@/lib/audioOutput";
 
 export function useAudioOutput() {
   const [headphonesConnected, setHeadphonesConnected] = useState(false);
   const [ready, setReady] = useState(false);
-
   const refresh = useCallback(async () => {
     const connected = await detectHeadphonesConnected();
     setHeadphonesConnected(connected);
@@ -15,34 +14,18 @@ export function useAudioOutput() {
   }, []);
 
   useEffect(() => {
-    let active = true;
-
-    const detect = async () => {
-      const connected = await detectHeadphonesConnected();
-      if (!active) return;
-      setHeadphonesConnected(connected);
-      setReady(true);
-    };
-
-    void detect();
+    void refresh();
 
     const media = navigator.mediaDevices;
-    if (!media?.addEventListener) {
-      return () => {
-        active = false;
-      };
-    }
+    if (!media?.addEventListener) return;
 
     const onDeviceChange = () => {
-      void detect();
+      void refresh();
     };
 
     media.addEventListener("devicechange", onDeviceChange);
-    return () => {
-      active = false;
-      media.removeEventListener("devicechange", onDeviceChange);
-    };
-  }, []);
+    return () => media.removeEventListener("devicechange", onDeviceChange);
+  }, [refresh]);
 
   return { headphonesConnected, ready, refresh };
 }
