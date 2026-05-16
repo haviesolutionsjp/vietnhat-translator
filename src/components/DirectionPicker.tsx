@@ -10,21 +10,19 @@ import {
 type Props = {
   mode: DirectionMode;
   activeDirection: Direction | null;
-  disabled?: boolean;
   onChange: (mode: DirectionMode) => void;
 };
 
 export function DirectionPicker({
   mode,
   activeDirection,
-  disabled,
   onChange,
 }: Props) {
   return (
     <div className="flex w-full max-w-md flex-col items-center gap-2">
       <div
-        className="grid w-full grid-cols-3 gap-1 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-1"
-        role="radiogroup"
+        className="relative z-10 grid w-full grid-cols-3 gap-1 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-1"
+        role="group"
         aria-label="Chiều dịch"
       >
         {DIRECTION_OPTIONS.map(({ mode: option, label, short }) => {
@@ -33,11 +31,12 @@ export function DirectionPicker({
             <button
               key={option}
               type="button"
-              role="radio"
-              aria-checked={selected}
-              disabled={disabled}
-              onClick={() => onChange(option)}
-              className={`rounded-xl px-2 py-2.5 text-center transition active:scale-[0.98] disabled:opacity-40 ${
+              aria-pressed={selected}
+              aria-label={label}
+              onClick={() => {
+                if (option !== mode) onChange(option);
+              }}
+              className={`min-h-11 cursor-pointer touch-manipulation rounded-xl px-2 py-2.5 text-center transition select-none active:scale-[0.98] ${
                 selected
                   ? option === "vi-ja"
                     ? "bg-emerald-700 text-white shadow-sm"
@@ -47,10 +46,10 @@ export function DirectionPicker({
                   : "text-zinc-400 hover:bg-zinc-800/80 hover:text-zinc-200"
               }`}
             >
-              <span className="block text-xs font-semibold sm:text-sm">
+              <span className="pointer-events-none block text-xs font-semibold sm:text-sm">
                 {short}
               </span>
-              <span className="mt-0.5 hidden text-[10px] opacity-80 sm:block">
+              <span className="pointer-events-none mt-0.5 hidden text-[10px] opacity-80 sm:block">
                 {label}
               </span>
             </button>

@@ -43,7 +43,9 @@ async function translateMyMemory(
   url.searchParams.set("q", text);
   url.searchParams.set("langpair", pair);
 
-  const res = await fetch(url.toString());
+  const res = await fetch(url.toString(), {
+    signal: AbortSignal.timeout(12_000),
+  });
   if (!res.ok) throw new Error("Dịch thất bại");
   const data = (await res.json()) as {
     responseData?: { translatedText?: string };
