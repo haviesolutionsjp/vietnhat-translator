@@ -6,6 +6,10 @@ let voicesReady: Promise<SpeechSynthesisVoice[]> | null = null;
 const voicePickCache = new Map<string, SpeechSynthesisVoice | undefined>();
 let speakGeneration = 0;
 
+function clamp(n: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, n));
+}
+
 export function isTTSSupported(): boolean {
   return typeof window !== "undefined" && "speechSynthesis" in window;
 }
@@ -82,13 +86,14 @@ function applyUtteranceSettings(
 
   const audio = getAudioSettings();
   const isJa = langCode.toLowerCase().startsWith("ja");
+  const baseRate = clamp(audio.ttsRate, 0.7, 1.4);
 
   utterance.volume = audio.ttsVolume;
   if (isJa && audio.jaClarityBoost) {
-    utterance.rate = 0.92;
+    utterance.rate = clamp(baseRate * 0.92, 0.1, 10);
     utterance.pitch = 1.05;
   } else {
-    utterance.rate = isJa ? 0.97 : 1;
+    utterance.rate = clamp(isJa ? baseRate * 0.97 : baseRate, 0.1, 10);
     utterance.pitch = 1;
   }
 }

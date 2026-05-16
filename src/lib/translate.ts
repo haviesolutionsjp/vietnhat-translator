@@ -5,10 +5,15 @@ import {
 } from "@/lib/lang";
 
 const translatorCache = new Map<Direction, TranslatorInstance>();
+const translatorInflight = new Map<Direction, Promise<TranslatorInstance | null>>();
+const translatorUnavailableUntil = new Map<Direction, number>();
 const resultCache = new Map<string, string>();
 const MAX_CACHE = 80;
 
-const CHROME_TIMEOUT_MS = 700;
+const CHROME_EARLY_WAIT_MS = 260;
+const MYMEMORY_HEDGE_DELAY_MS = 220;
+const TRANSLATOR_UNAVAILABLE_RETRY_MS = 45_000;
+const TRANSLATOR_CREATE_RETRY_MS = 8_000;
 
 function cacheKey(direction: Direction, text: string): string {
   return `${direction}\0${text}`;
@@ -24,6 +29,14 @@ function remember(direction: Direction, source: string, translated: string): str
   return translated;
 }
 
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function blockTranslator(direction: Direction, durationMs: number): void {
+  translatorUnavailableUntil.set(direction, Date.now() + durationMs);
+}
+
 async function getChromeTranslator(
   direction: Direction,
 ): Promise<TranslatorInstance | null> {
@@ -33,23 +46,41 @@ async function getChromeTranslator(
   const cached = translatorCache.get(direction);
   if (cached) return cached;
 
-  const { source, target } = translatorCodes(direction);
-  try {
-    const availability = await Translator.availability({
-      sourceLanguage: source,
-      targetLanguage: target,
-    });
-    if (availability === "unavailable") return null;
+  const blockedUntil = translatorUnavailableUntil.get(direction) ?? 0;
+  if (blockedUntil > Date.now()) return null;
 
-    const instance = await Translator.create({
-      sourceLanguage: source,
-      targetLanguage: target,
-    });
-    translatorCache.set(direction, instance);
-    return instance;
-  } catch {
-    return null;
-  }
+  const inflight = translatorInflight.get(direction);
+  if (inflight) return inflight;
+
+  const task = (async () => {
+    const { source, target } = translatorCodes(direction);
+    try {
+      const availability = await Translator.availability({
+        sourceLanguage: source,
+        targetLanguage: target,
+      });
+      if (availability === "unavailable") {
+        blockTranslator(direction, TRANSLATOR_UNAVAILABLE_RETRY_MS);
+        return null;
+      }
+
+      const instance = await Translator.create({
+        sourceLanguage: source,
+        targetLanguage: target,
+      });
+      translatorCache.set(direction, instance);
+      translatorUnavailableUntil.delete(direction);
+      return instance;
+    } catch {
+      blockTranslator(direction, TRANSLATOR_CREATE_RETRY_MS);
+      return null;
+    } finally {
+      translatorInflight.delete(direction);
+    }
+  })();
+
+  translatorInflight.set(direction, task);
+  return task;
 }
 
 async function translateChrome(
@@ -99,23 +130,31 @@ export async function translateText(
   const chromeFast = translateChrome(trimmed, direction);
   const chromeResult = await Promise.race([
     chromeFast,
-    new Promise<null>((resolve) =>
-      window.setTimeout(() => resolve(null), CHROME_TIMEOUT_MS),
-    ),
+    wait(CHROME_EARLY_WAIT_MS).then(() => null as string | null),
   ]);
 
   if (chromeResult) {
     return remember(direction, trimmed, chromeResult);
   }
 
-  const pending = chromeFast.catch(() => null);
-  const myMemory = translateMyMemory(trimmed, direction);
+  const myMemoryHedged = wait(MYMEMORY_HEDGE_DELAY_MS)
+    .then(() => translateMyMemory(trimmed, direction))
+    .catch(() => null as string | null);
 
-  const [lateChrome, mm] = await Promise.all([pending, myMemory]);
+  const firstWinner = await Promise.race([chromeFast, myMemoryHedged]);
+  if (firstWinner) {
+    return remember(direction, trimmed, firstWinner);
+  }
+
+  const [lateChrome, hedgedMemory] = await Promise.all([chromeFast, myMemoryHedged]);
   if (lateChrome) {
     return remember(direction, trimmed, lateChrome);
   }
+  if (hedgedMemory) {
+    return remember(direction, trimmed, hedgedMemory);
+  }
 
+  const mm = await translateMyMemory(trimmed, direction);
   return remember(direction, trimmed, mm);
 }
 
@@ -132,5 +171,7 @@ export function resetTranslatorCache(): void {
     instance.destroy();
   }
   translatorCache.clear();
+  translatorInflight.clear();
+  translatorUnavailableUntil.clear();
   resultCache.clear();
 }

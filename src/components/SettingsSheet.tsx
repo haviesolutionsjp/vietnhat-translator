@@ -79,6 +79,14 @@ export function SettingsSheet({
               unit="%"
               onChange={(v) => patch({ ttsVolume: v / 100 })}
             />
+            <Slider
+              label="Tốc độ phát âm"
+              value={Math.round(settings.ttsRate * 100)}
+              min={70}
+              max={140}
+              unit="%"
+              onChange={(v) => patch({ ttsRate: v / 100 })}
+            />
             <Toggle
               label="Nghe tiếng Nhật rõ hơn"
               description="Giọng đọc chậm và sáng hơn khi phát tiếng Nhật"

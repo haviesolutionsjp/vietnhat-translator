@@ -250,7 +250,8 @@ export function TranslatorApp() {
       debounceRef.current = setTimeout(() => {
         const stableFor = Date.now() - stableSinceRef.current;
         const stable = stableTextRef.current.trim();
-        if (stableFor >= INTERIM_STABLE_MS && stable.length >= INTERIM_MIN_CHARS) {
+        const minChars = minCharsFor(resolveDirection(modeRef.current, stable));
+        if (stableFor >= INTERIM_STABLE_MS && stable.length >= minChars) {
           void runTranslation(stable);
         }
       }, INTERIM_STABLE_MS);
