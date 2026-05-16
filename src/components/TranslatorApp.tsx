@@ -40,6 +40,8 @@ type Status = "idle" | "listening" | "translating" | "speaking";
 const INTERIM_STABLE_MS = 110;
 const INTERIM_RETRANSLATE_GAP_MS = 120;
 const INTERIM_MIN_CHARS = 2;
+const AUTO_SEGMENT_SPEAK_MS = 3_500;
+const AUTO_SEGMENT_MIN_CHARS = 2;
 
 function recognitionLang(mode: DirectionMode, detected: Direction | null): string {
   if (mode === "vi-ja") return sourceLang("vi-ja");
@@ -103,6 +105,9 @@ export function TranslatorApp() {
   const translateGenRef = useRef(0);
   const lastSpokenTranslationRef = useRef("");
   const lastInterimTranslateAtRef = useRef(0);
+  const latestTranscriptRef = useRef("");
+  const lastAutoSpokenSourceRef = useRef("");
+  const autoSpeakTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   modeRef.current = mode;
   detectedRef.current = detectedDirection;
@@ -113,11 +118,15 @@ export function TranslatorApp() {
   const stopListening = useCallback(() => {
     listeningRef.current = false;
     lastInterimTranslateAtRef.current = 0;
+    latestTranscriptRef.current = "";
+    lastAutoSpokenSourceRef.current = "";
     setListening(false);
     setStatus("idle");
     networkRetriesRef.current = 0;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
+    if (autoSpeakTimerRef.current) clearInterval(autoSpeakTimerRef.current);
+    autoSpeakTimerRef.current = null;
     recognitionRef.current?.abort();
     recognitionRef.current = null;
     stopMicEnhancer();
@@ -164,8 +173,13 @@ export function TranslatorApp() {
   );
 
   const playTranslation = useCallback(
-    (translated: string, direction: Direction) => {
+    (
+      translated: string,
+      direction: Direction,
+      opts?: { force?: boolean },
+    ) => {
       if (
+        !opts?.force &&
         !shouldAutoPlaySpeech(
           audioSettingsRef.current.playbackMode,
           headphonesRef.current,
@@ -184,7 +198,10 @@ export function TranslatorApp() {
   );
 
   const runTranslation = useCallback(
-    async (sourceText: string, opts?: { final?: boolean }) => {
+    async (
+      sourceText: string,
+      opts?: { final?: boolean; forceSpeak?: boolean },
+    ) => {
       const trimmed = sourceText.trim();
       if (trimmed.length < minCharsFor(resolveDirection(modeRef.current, trimmed))) {
         return;
@@ -215,18 +232,19 @@ export function TranslatorApp() {
         setLastTranslateLatencyMs(Math.max(1, Math.round(performance.now() - startedAt)));
         setLastSpeakDirection(direction);
         setLastTranslation(translated);
+        const willAutoSpeak =
+          Boolean(opts?.forceSpeak) ||
+          shouldAutoPlaySpeech(
+            audioSettingsRef.current.playbackMode,
+            headphonesRef.current,
+          );
 
-        playTranslation(translated, direction);
+        playTranslation(translated, direction, {
+          force: Boolean(opts?.forceSpeak),
+        });
 
         if (listeningRef.current) {
-          setStatus(
-            shouldAutoPlaySpeech(
-              audioSettingsRef.current.playbackMode,
-              headphonesRef.current,
-            )
-              ? "speaking"
-              : "listening",
-          );
+          setStatus(willAutoSpeak ? "speaking" : "listening");
         }
       } catch (e) {
         if (gen !== translateGenRef.current) return;
@@ -251,6 +269,7 @@ export function TranslatorApp() {
 
       const now = Date.now();
       const trimmed = text.trim();
+      latestTranscriptRef.current = trimmed;
       if (trimmed !== stableTextRef.current) {
         stableTextRef.current = trimmed;
         stableSinceRef.current = now;
@@ -408,6 +427,8 @@ export function TranslatorApp() {
       lastTranslatedDirRef.current = null;
       lastSpokenTranslationRef.current = "";
       lastInterimTranslateAtRef.current = 0;
+      latestTranscriptRef.current = "";
+      lastAutoSpokenSourceRef.current = "";
       translateGenRef.current = 0;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không bật được micro");
@@ -428,6 +449,8 @@ export function TranslatorApp() {
     lastTranslatedDirRef.current = null;
     lastSpokenTranslationRef.current = "";
     lastInterimTranslateAtRef.current = 0;
+    latestTranscriptRef.current = "";
+    lastAutoSpokenSourceRef.current = "";
     startRecognition();
   }, [listening, startRecognition, stopListening]);
 
@@ -447,6 +470,8 @@ export function TranslatorApp() {
       lastTranslatedRef.current = "";
       lastTranslatedDirRef.current = null;
       lastInterimTranslateAtRef.current = 0;
+      latestTranscriptRef.current = "";
+      lastAutoSpokenSourceRef.current = "";
       setError(null);
 
       if (wasListening) {
@@ -517,6 +542,29 @@ export function TranslatorApp() {
     },
     [lastTranslation, playTranslation],
   );
+
+  useEffect(() => {
+    if (!listening) {
+      if (autoSpeakTimerRef.current) clearInterval(autoSpeakTimerRef.current);
+      autoSpeakTimerRef.current = null;
+      return;
+    }
+
+    autoSpeakTimerRef.current = setInterval(() => {
+      if (!listeningRef.current) return;
+      const source = latestTranscriptRef.current.trim();
+      if (source.length < AUTO_SEGMENT_MIN_CHARS) return;
+      if (source === lastAutoSpokenSourceRef.current) return;
+
+      lastAutoSpokenSourceRef.current = source;
+      void runTranslation(source, { final: true, forceSpeak: true });
+    }, AUTO_SEGMENT_SPEAK_MS);
+
+    return () => {
+      if (autoSpeakTimerRef.current) clearInterval(autoSpeakTimerRef.current);
+      autoSpeakTimerRef.current = null;
+    };
+  }, [listening, runTranslation]);
 
   useEffect(() => {
     const onVisibility = () => {
@@ -599,6 +647,11 @@ export function TranslatorApp() {
         {lastTranslateLatencyMs !== null ? (
           <p className="mt-[-1rem] text-center text-[11px] text-zinc-600">
             Tốc độ dịch gần nhất: {lastTranslateLatencyMs}ms
+          </p>
+        ) : null}
+        {listening ? (
+          <p className="mt-[-1rem] text-center text-[11px] text-zinc-600">
+            Tự dịch và phát âm mỗi ~3.5 giây
           </p>
         ) : null}
 
