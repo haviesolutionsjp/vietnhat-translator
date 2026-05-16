@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DirectionPicker } from "@/components/DirectionPicker";
-import { SpeechPlaybackPicker } from "@/components/SpeechPlaybackPicker";
+import { SettingsPanel } from "@/components/SettingsPanel";
 import { TargetSpeech } from "@/components/TargetSpeech";
 import { useAudioOutput } from "@/hooks/useAudioOutput";
 import {
@@ -25,11 +25,12 @@ import {
   warmTranslators,
 } from "@/lib/translate";
 import {
-  loadSpeechPlaybackMode,
-  saveSpeechPlaybackMode,
-  shouldAutoPlaySpeech,
-  type SpeechPlaybackMode,
-} from "@/lib/speechPlayback";
+  loadAudioSettings,
+  saveAudioSettings,
+  type AudioSettings,
+} from "@/lib/audioSettings";
+import { startMicSession, type MicSession } from "@/lib/micEnhance";
+import { shouldAutoPlaySpeech } from "@/lib/speechPlayback";
 import { cancelSpeech, prepareVoices, speakForDirection } from "@/lib/tts";
 
 type Status = "idle" | "listening" | "translating" | "speaking";
@@ -56,8 +57,10 @@ export function TranslatorApp() {
   const [status, setStatus] = useState<Status>("idle");
   const [lastTranslation, setLastTranslation] = useState("");
   const [lastSpeakDirection, setLastSpeakDirection] = useState<Direction>("vi-ja");
-  const [playbackMode, setPlaybackMode] =
-    useState<SpeechPlaybackMode>("headphones");
+  const [audioSettings, setAudioSettings] = useState<AudioSettings>(
+    loadAudioSettings,
+  );
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
   const [supported, setSupported] = useState(false);
@@ -79,14 +82,15 @@ export function TranslatorApp() {
   const stableSinceRef = useRef(0);
   const networkRetriesRef = useRef(0);
   const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const playbackModeRef = useRef(playbackMode);
+  const audioSettingsRef = useRef(audioSettings);
   const headphonesRef = useRef(headphonesConnected);
   const prevHeadphonesRef = useRef(false);
+  const micSessionRef = useRef<MicSession | null>(null);
 
   modeRef.current = mode;
   detectedRef.current = detectedDirection;
   listeningRef.current = listening;
-  playbackModeRef.current = playbackMode;
+  audioSettingsRef.current = audioSettings;
   headphonesRef.current = headphonesConnected;
 
   const stopListening = useCallback(() => {
@@ -96,6 +100,8 @@ export function TranslatorApp() {
     networkRetriesRef.current = 0;
     if (debounceRef.current) clearTimeout(debounceRef.current);
     if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
+    micSessionRef.current?.cleanup();
+    micSessionRef.current = null;
     recognitionRef.current?.abort();
     recognitionRef.current = null;
   }, []);
@@ -144,7 +150,7 @@ export function TranslatorApp() {
     async (translated: string, direction: Direction) => {
       if (
         !shouldAutoPlaySpeech(
-          playbackModeRef.current,
+          audioSettingsRef.current.playbackMode,
           headphonesRef.current,
         )
       ) {
@@ -153,7 +159,11 @@ export function TranslatorApp() {
       setStatus("speaking");
       cancelSpeech();
       prepareVoices();
-      await speakForDirection(translated, direction);
+      await speakForDirection(
+        translated,
+        direction,
+        audioSettingsRef.current,
+      );
     },
     [],
   );
@@ -301,7 +311,7 @@ export function TranslatorApp() {
     [scheduleRecognitionRestart, scheduleTranslation, stopListening],
   );
 
-  const startRecognition = useCallback(() => {
+  const startRecognition = useCallback(async () => {
     if (!isSpeechRecognitionSupported()) {
       setSupported(false);
       setError("Dùng Chrome trên Android để nhận dạng giọng nói.");
@@ -317,6 +327,9 @@ export function TranslatorApp() {
 
     try {
       networkRetriesRef.current = 0;
+      micSessionRef.current?.cleanup();
+      micSessionRef.current = await startMicSession(audioSettingsRef.current);
+
       const initialDetected =
         modeRef.current === "ja-vi"
           ? "ja-vi"
@@ -348,6 +361,8 @@ export function TranslatorApp() {
       lastTranslatedRef.current = "";
       lastTranslatedDirRef.current = null;
     } catch (e) {
+      micSessionRef.current?.cleanup();
+      micSessionRef.current = null;
       setError(e instanceof Error ? e.message : "Không bật được micro");
       stopListening();
     }
@@ -391,7 +406,9 @@ export function TranslatorApp() {
 
   useEffect(() => {
     setMounted(true);
-    setPlaybackMode(loadSpeechPlaybackMode());
+    const loaded = loadAudioSettings();
+    setAudioSettings(loaded);
+    audioSettingsRef.current = loaded;
     setSupported(isSpeechRecognitionSupported());
     prepareVoices();
     void warmTranslators();
@@ -406,7 +423,7 @@ export function TranslatorApp() {
     if (
       !wasConnected &&
       headphonesConnected &&
-      shouldAutoPlaySpeech(playbackModeRef.current, true)
+      shouldAutoPlaySpeech(audioSettingsRef.current.playbackMode, true)
     ) {
       prepareVoices();
       const text = lastTranslation;
@@ -415,7 +432,7 @@ export function TranslatorApp() {
         void (async () => {
           setStatus("speaking");
           cancelSpeech();
-          await speakForDirection(text, dir);
+          await speakForDirection(text, dir, audioSettingsRef.current);
           if (listeningRef.current) setStatus("listening");
           else setStatus("idle");
         })();
@@ -423,22 +440,24 @@ export function TranslatorApp() {
     }
   }, [headphonesConnected, audioOutputReady, lastTranslation]);
 
-  const changePlaybackMode = useCallback((next: SpeechPlaybackMode) => {
-    if (next === playbackModeRef.current) return;
-    playbackModeRef.current = next;
-    setPlaybackMode(next);
-    saveSpeechPlaybackMode(next);
+  const handleSettingsChange = useCallback(
+    (next: AudioSettings) => {
+      audioSettingsRef.current = next;
+      setAudioSettings(next);
+      saveAudioSettings(next);
 
-    if (next === "off") cancelSpeech();
+      if (next.playbackMode === "off") cancelSpeech();
 
-    if (
-      next === "on" &&
-      lastTranslation &&
-      lastTranslatedDirRef.current
-    ) {
-      void playTranslation(lastTranslation, lastTranslatedDirRef.current);
-    }
-  }, [lastTranslation, playTranslation]);
+      if (
+        next.playbackMode === "on" &&
+        lastTranslation &&
+        lastTranslatedDirRef.current
+      ) {
+        void playTranslation(lastTranslation, lastTranslatedDirRef.current);
+      }
+    },
+    [lastTranslation, playTranslation],
+  );
 
   useEffect(() => {
     const onVisibility = () => {
@@ -482,20 +501,33 @@ export function TranslatorApp() {
   return (
     <div className="flex min-h-[100dvh] flex-col items-center justify-between bg-[#0c0f14] px-6 pb-[max(1.5rem,env(safe-area-inset-bottom))] pt-[max(1.5rem,env(safe-area-inset-top))] text-zinc-100">
       <header className="relative z-20 flex w-full max-w-md shrink-0 flex-col items-center gap-4">
-        <h1 className="text-lg font-medium tracking-tight text-zinc-400">
-          Việt ↔ Nhật
-        </h1>
+        <div className="flex w-full items-center justify-between">
+          <h1 className="text-lg font-medium tracking-tight text-zinc-400">
+            Việt ↔ Nhật
+          </h1>
+          <button
+            type="button"
+            onClick={() => setSettingsOpen(true)}
+            className="flex min-h-10 min-w-10 items-center justify-center rounded-full border border-zinc-700 bg-zinc-900/80 text-zinc-300 transition hover:border-zinc-500 hover:text-white"
+            aria-label="Cài đặt âm thanh"
+          >
+            <GearIcon />
+          </button>
+        </div>
         <DirectionPicker
           mode={mode}
           activeDirection={activeDirection}
           onChange={changeMode}
         />
-        <SpeechPlaybackPicker
-          mode={playbackMode}
-          headphonesConnected={headphonesConnected}
-          onChange={changePlaybackMode}
-        />
       </header>
+
+      <SettingsPanel
+        open={settingsOpen}
+        settings={audioSettings}
+        headphonesConnected={headphonesConnected}
+        onClose={() => setSettingsOpen(false)}
+        onChange={handleSettingsChange}
+      />
 
       <main className="relative z-0 flex min-h-0 flex-1 flex-col items-center justify-center gap-8">
         <p
@@ -531,6 +563,7 @@ export function TranslatorApp() {
           <TargetSpeech
             text={lastTranslation}
             direction={lastSpeakDirection}
+            settings={audioSettings}
             speaking={status === "speaking"}
             onSpeakingChange={(speaking) => {
               if (speaking) setStatus("speaking");
@@ -540,11 +573,12 @@ export function TranslatorApp() {
           />
         ) : (
           <p className="max-w-xs text-center text-xs text-zinc-600">
-            {playbackMode === "off"
-              ? "Phát âm tắt — bấm Nghe để nghe bản dịch"
-              : playbackMode === "headphones" && !headphonesConnected
-                ? "Cắm tai nghe để tự phát âm sau khi dịch"
-                : "Bản dịch tự phát âm · bấm Nghe để nghe lại"}
+            {audioSettings.playbackMode === "off"
+              ? "Phát âm tắt — mở Cài đặt hoặc bấm Nghe"
+              : audioSettings.playbackMode === "headphones" &&
+                  !headphonesConnected
+                ? "Cắm tai nghe hoặc mở Cài đặt để tự phát âm"
+                : "Bản dịch tự phát âm · Cài đặt để chỉnh âm lượng & lọc ồn"}
           </p>
         )}
       </main>
@@ -559,6 +593,24 @@ export function TranslatorApp() {
         </p>
       ) : null}
     </div>
+  );
+}
+
+function GearIcon() {
+  return (
+    <svg
+      xmlns="http://www.w3.org/2000/svg"
+      viewBox="0 0 24 24"
+      fill="currentColor"
+      className="h-5 w-5"
+      aria-hidden
+    >
+      <path
+        fillRule="evenodd"
+        d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l1.17 1.012c.11.095.178.27.154.43a7.598 7.598 0 0 0 0 1.139c.024.16-.044.335-.154.43l-1.17 1.012a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.116-.043.284-.031.45.082.312.214.641.405.986.57.182.088.277.228.297.348l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.345-.165.674-.356.986-.57.166-.114.334-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.818l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-1.17-1.012c-.11-.095-.178-.27-.154-.43a7.598 7.598 0 0 0 0-1.139c-.024-.16.044-.335.154-.43l1.17-1.012a1.875 1.875 0 0 0 .432-2.385l-.923-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.116.043-.284.031-.45-.082a7.503 7.503 0 0 0-.986-.57c-.183-.087-.277-.227-.297-.348l-.178-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z"
+        clipRule="evenodd"
+      />
+    </svg>
   );
 }
 
