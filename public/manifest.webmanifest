@@ -1,0 +1,11 @@
+{
+  "name": "Việt ↔ Nhật Dịch giọng",
+  "short_name": "Việt Nhật",
+  "description": "Dịch giọng nói realtime Việt Nhật. Xử lý trên thiết bị, không lưu audio server.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0c0f14",
+  "theme_color": "#0c0f14",
+  "orientation": "portrait",
+  "lang": "vi"
+}
