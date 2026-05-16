@@ -37,7 +37,8 @@ import { cancelSpeech, prepareVoices, speakForDirection } from "@/lib/tts";
 type Status = "idle" | "listening" | "translating" | "speaking";
 
 /** Chờ text ổn định trước khi dịch partial (ms) */
-const INTERIM_STABLE_MS = 160;
+const INTERIM_STABLE_MS = 110;
+const INTERIM_RETRANSLATE_GAP_MS = 120;
 const INTERIM_MIN_CHARS = 2;
 
 function recognitionLang(mode: DirectionMode, detected: Direction | null): string {
@@ -67,6 +68,9 @@ export function TranslatorApp() {
   const [listening, setListening] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [lastTranslation, setLastTranslation] = useState("");
+  const [lastTranslateLatencyMs, setLastTranslateLatencyMs] = useState<
+    number | null
+  >(null);
   const [lastSpeakDirection, setLastSpeakDirection] = useState<Direction>("vi-ja");
   const [audioSettings, setAudioSettings] = useState<AudioSettings>(
     DEFAULT_AUDIO_SETTINGS,
@@ -98,6 +102,7 @@ export function TranslatorApp() {
   const prevHeadphonesRef = useRef(false);
   const translateGenRef = useRef(0);
   const lastSpokenTranslationRef = useRef("");
+  const lastInterimTranslateAtRef = useRef(0);
 
   modeRef.current = mode;
   detectedRef.current = detectedDirection;
@@ -107,6 +112,7 @@ export function TranslatorApp() {
 
   const stopListening = useCallback(() => {
     listeningRef.current = false;
+    lastInterimTranslateAtRef.current = 0;
     setListening(false);
     setStatus("idle");
     networkRetriesRef.current = 0;
@@ -196,6 +202,7 @@ export function TranslatorApp() {
       }
 
       const gen = ++translateGenRef.current;
+      const startedAt = performance.now();
       setStatus("translating");
       setError(null);
 
@@ -205,6 +212,7 @@ export function TranslatorApp() {
 
         lastTranslatedRef.current = trimmed;
         lastTranslatedDirRef.current = direction;
+        setLastTranslateLatencyMs(Math.max(1, Math.round(performance.now() - startedAt)));
         setLastSpeakDirection(direction);
         setLastTranslation(translated);
 
@@ -242,16 +250,31 @@ export function TranslatorApp() {
       }
 
       const now = Date.now();
-      if (text !== stableTextRef.current) {
-        stableTextRef.current = text;
+      const trimmed = text.trim();
+      if (trimmed !== stableTextRef.current) {
+        stableTextRef.current = trimmed;
         stableSinceRef.current = now;
+      }
+
+      const minChars = minCharsFor(resolveDirection(modeRef.current, trimmed));
+      if (
+        trimmed.length >= minChars &&
+        now - lastInterimTranslateAtRef.current >= INTERIM_RETRANSLATE_GAP_MS
+      ) {
+        lastInterimTranslateAtRef.current = now;
+        void runTranslation(trimmed);
       }
 
       debounceRef.current = setTimeout(() => {
         const stableFor = Date.now() - stableSinceRef.current;
         const stable = stableTextRef.current.trim();
-        const minChars = minCharsFor(resolveDirection(modeRef.current, stable));
-        if (stableFor >= INTERIM_STABLE_MS && stable.length >= minChars) {
+        const stableMinChars = minCharsFor(resolveDirection(modeRef.current, stable));
+        if (
+          stableFor >= INTERIM_STABLE_MS &&
+          stable.length >= stableMinChars &&
+          Date.now() - lastInterimTranslateAtRef.current >= INTERIM_RETRANSLATE_GAP_MS
+        ) {
+          lastInterimTranslateAtRef.current = Date.now();
           void runTranslation(stable);
         }
       }, INTERIM_STABLE_MS);
@@ -380,9 +403,11 @@ export function TranslatorApp() {
       listeningRef.current = true;
       setStatus("listening");
       setError(null);
+      setLastTranslateLatencyMs(null);
       lastTranslatedRef.current = "";
       lastTranslatedDirRef.current = null;
       lastSpokenTranslationRef.current = "";
+      lastInterimTranslateAtRef.current = 0;
       translateGenRef.current = 0;
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không bật được micro");
@@ -398,9 +423,11 @@ export function TranslatorApp() {
     }
     prepareVoices();
     setLastTranslation("");
+    setLastTranslateLatencyMs(null);
     lastTranslatedRef.current = "";
     lastTranslatedDirRef.current = null;
     lastSpokenTranslationRef.current = "";
+    lastInterimTranslateAtRef.current = 0;
     startRecognition();
   }, [listening, startRecognition, stopListening]);
 
@@ -416,8 +443,10 @@ export function TranslatorApp() {
       setDetectedDirection(null);
       detectedRef.current = null;
       setLastTranslation("");
+      setLastTranslateLatencyMs(null);
       lastTranslatedRef.current = "";
       lastTranslatedDirRef.current = null;
+      lastInterimTranslateAtRef.current = 0;
       setError(null);
 
       if (wasListening) {
@@ -567,6 +596,11 @@ export function TranslatorApp() {
         >
           {statusLabel}
         </p>
+        {lastTranslateLatencyMs !== null ? (
+          <p className="mt-[-1rem] text-center text-[11px] text-zinc-600">
+            Tốc độ dịch gần nhất: {lastTranslateLatencyMs}ms
+          </p>
+        ) : null}
 
         <button
           type="button"
