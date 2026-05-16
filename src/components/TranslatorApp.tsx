@@ -2,7 +2,9 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DirectionPicker } from "@/components/DirectionPicker";
+import { SpeechPlaybackPicker } from "@/components/SpeechPlaybackPicker";
 import { TargetSpeech } from "@/components/TargetSpeech";
+import { useAudioOutput } from "@/hooks/useAudioOutput";
 import {
   listenHint,
   resolveDirection,
@@ -22,6 +24,12 @@ import {
   translateText,
   warmTranslators,
 } from "@/lib/translate";
+import {
+  loadSpeechPlaybackMode,
+  saveSpeechPlaybackMode,
+  shouldAutoPlaySpeech,
+  type SpeechPlaybackMode,
+} from "@/lib/speechPlayback";
 import { cancelSpeech, prepareVoices, speakForDirection } from "@/lib/tts";
 
 type Status = "idle" | "listening" | "translating" | "speaking";
@@ -48,9 +56,17 @@ export function TranslatorApp() {
   const [status, setStatus] = useState<Status>("idle");
   const [lastTranslation, setLastTranslation] = useState("");
   const [lastSpeakDirection, setLastSpeakDirection] = useState<Direction>("vi-ja");
+  const [playbackMode, setPlaybackMode] =
+    useState<SpeechPlaybackMode>("headphones");
   const [error, setError] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
   const [supported, setSupported] = useState(false);
+
+  const {
+    headphonesConnected,
+    ready: audioOutputReady,
+    refresh: refreshAudioOutput,
+  } = useAudioOutput();
 
   const listeningRef = useRef(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
@@ -63,10 +79,15 @@ export function TranslatorApp() {
   const stableSinceRef = useRef(0);
   const networkRetriesRef = useRef(0);
   const restartTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const playbackModeRef = useRef(playbackMode);
+  const headphonesRef = useRef(headphonesConnected);
+  const prevHeadphonesRef = useRef(false);
 
   modeRef.current = mode;
   detectedRef.current = detectedDirection;
   listeningRef.current = listening;
+  playbackModeRef.current = playbackMode;
+  headphonesRef.current = headphonesConnected;
 
   const stopListening = useCallback(() => {
     listeningRef.current = false;
@@ -119,6 +140,24 @@ export function TranslatorApp() {
     [applyRecognitionLang, scheduleRecognitionRestart],
   );
 
+  const playTranslation = useCallback(
+    async (translated: string, direction: Direction) => {
+      if (
+        !shouldAutoPlaySpeech(
+          playbackModeRef.current,
+          headphonesRef.current,
+        )
+      ) {
+        return;
+      }
+      setStatus("speaking");
+      cancelSpeech();
+      prepareVoices();
+      await speakForDirection(translated, direction);
+    },
+    [],
+  );
+
   const runTranslation = useCallback(async (sourceText: string) => {
     const trimmed = sourceText.trim();
     if (!trimmed) return;
@@ -142,16 +181,14 @@ export function TranslatorApp() {
       lastTranslatedDirRef.current = direction;
       setLastSpeakDirection(direction);
       setLastTranslation(translated);
-      setStatus("speaking");
-      cancelSpeech();
-      await speakForDirection(translated, direction);
+      await playTranslation(translated, direction);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không dịch được");
     } finally {
       if (listeningRef.current) setStatus("listening");
       else setStatus("idle");
     }
-  }, []);
+  }, [playTranslation]);
 
   const scheduleTranslation = useCallback(
     (text: string, isFinal: boolean) => {
@@ -303,6 +340,7 @@ export function TranslatorApp() {
       bindRecognitionHandlers(recognition);
 
       recognition.start();
+      void refreshAudioOutput();
       setListening(true);
       listeningRef.current = true;
       setStatus("listening");
@@ -313,7 +351,7 @@ export function TranslatorApp() {
       setError(e instanceof Error ? e.message : "Không bật được micro");
       stopListening();
     }
-  }, [bindRecognitionHandlers, stopListening]);
+  }, [bindRecognitionHandlers, refreshAudioOutput, stopListening]);
 
   const toggleListening = useCallback(() => {
     if (listening) {
@@ -353,10 +391,54 @@ export function TranslatorApp() {
 
   useEffect(() => {
     setMounted(true);
+    setPlaybackMode(loadSpeechPlaybackMode());
     setSupported(isSpeechRecognitionSupported());
     prepareVoices();
     void warmTranslators();
   }, []);
+
+  useEffect(() => {
+    if (!audioOutputReady) return;
+
+    const wasConnected = prevHeadphonesRef.current;
+    prevHeadphonesRef.current = headphonesConnected;
+
+    if (
+      !wasConnected &&
+      headphonesConnected &&
+      shouldAutoPlaySpeech(playbackModeRef.current, true)
+    ) {
+      prepareVoices();
+      const text = lastTranslation;
+      const dir = lastTranslatedDirRef.current;
+      if (text && dir) {
+        void (async () => {
+          setStatus("speaking");
+          cancelSpeech();
+          await speakForDirection(text, dir);
+          if (listeningRef.current) setStatus("listening");
+          else setStatus("idle");
+        })();
+      }
+    }
+  }, [headphonesConnected, audioOutputReady, lastTranslation]);
+
+  const changePlaybackMode = useCallback((next: SpeechPlaybackMode) => {
+    if (next === playbackModeRef.current) return;
+    playbackModeRef.current = next;
+    setPlaybackMode(next);
+    saveSpeechPlaybackMode(next);
+
+    if (next === "off") cancelSpeech();
+
+    if (
+      next === "on" &&
+      lastTranslation &&
+      lastTranslatedDirRef.current
+    ) {
+      void playTranslation(lastTranslation, lastTranslatedDirRef.current);
+    }
+  }, [lastTranslation, playTranslation]);
 
   useEffect(() => {
     const onVisibility = () => {
@@ -408,9 +490,11 @@ export function TranslatorApp() {
           activeDirection={activeDirection}
           onChange={changeMode}
         />
-        <p className="text-center text-xs text-zinc-500">
-          Hai chiều: Việt→Nhật · Nhật→Việt · Tự động
-        </p>
+        <SpeechPlaybackPicker
+          mode={playbackMode}
+          headphonesConnected={headphonesConnected}
+          onChange={changePlaybackMode}
+        />
       </header>
 
       <main className="relative z-0 flex min-h-0 flex-1 flex-col items-center justify-center gap-8">
@@ -456,7 +540,11 @@ export function TranslatorApp() {
           />
         ) : (
           <p className="max-w-xs text-center text-xs text-zinc-600">
-            Bản dịch sẽ đọc tự động · chạm Nghe để phát lại
+            {playbackMode === "off"
+              ? "Phát âm tắt — bấm Nghe để nghe bản dịch"
+              : playbackMode === "headphones" && !headphonesConnected
+                ? "Cắm tai nghe để tự phát âm sau khi dịch"
+                : "Bản dịch tự phát âm · bấm Nghe để nghe lại"}
           </p>
         )}
       </main>
