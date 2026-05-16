@@ -46,10 +46,11 @@ export async function startMicSession(
       compressor.attack.value = 0.01;
       compressor.release.value = 0.15;
 
+      const sink = audioContext.createAnalyser();
       source.connect(highpass);
       highpass.connect(lowShelf);
       lowShelf.connect(compressor);
-      compressor.connect(audioContext.destination);
+      compressor.connect(sink);
 
       if (audioContext.state === "suspended") {
         await audioContext.resume();

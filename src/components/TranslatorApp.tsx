@@ -5,6 +5,7 @@ import { DirectionPicker } from "@/components/DirectionPicker";
 import { SettingsPanel } from "@/components/SettingsPanel";
 import { TargetSpeech } from "@/components/TargetSpeech";
 import { useAudioOutput } from "@/hooks/useAudioOutput";
+import { useIsClient } from "@/hooks/useIsClient";
 import {
   listenHint,
   resolveDirection,
@@ -25,6 +26,7 @@ import {
   warmTranslators,
 } from "@/lib/translate";
 import {
+  DEFAULT_AUDIO_SETTINGS,
   loadAudioSettings,
   saveAudioSettings,
   type AudioSettings,
@@ -57,13 +59,15 @@ export function TranslatorApp() {
   const [status, setStatus] = useState<Status>("idle");
   const [lastTranslation, setLastTranslation] = useState("");
   const [lastSpeakDirection, setLastSpeakDirection] = useState<Direction>("vi-ja");
-  const [audioSettings, setAudioSettings] = useState<AudioSettings>(
-    loadAudioSettings,
+  const [audioSettings, setAudioSettings] = useState<AudioSettings>(() =>
+    typeof window !== "undefined"
+      ? loadAudioSettings()
+      : DEFAULT_AUDIO_SETTINGS,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mounted, setMounted] = useState(false);
-  const [supported, setSupported] = useState(false);
+  const isClient = useIsClient();
+  const speechSupported = isSpeechRecognitionSupported();
 
   const {
     headphonesConnected,
@@ -87,11 +91,13 @@ export function TranslatorApp() {
   const prevHeadphonesRef = useRef(false);
   const micSessionRef = useRef<MicSession | null>(null);
 
-  modeRef.current = mode;
-  detectedRef.current = detectedDirection;
-  listeningRef.current = listening;
-  audioSettingsRef.current = audioSettings;
-  headphonesRef.current = headphonesConnected;
+  useEffect(() => {
+    modeRef.current = mode;
+    detectedRef.current = detectedDirection;
+    listeningRef.current = listening;
+    audioSettingsRef.current = audioSettings;
+    headphonesRef.current = headphonesConnected;
+  }, [mode, detectedDirection, listening, audioSettings, headphonesConnected]);
 
   const stopListening = useCallback(() => {
     listeningRef.current = false;
@@ -113,7 +119,15 @@ export function TranslatorApp() {
       try {
         recognitionRef.current.start();
       } catch {
-        scheduleRecognitionRestart(Math.min(delayMs * 2, 3000));
+        const retryMs = Math.min(delayMs * 2, 3000);
+        restartTimeoutRef.current = setTimeout(() => {
+          if (!listeningRef.current || !recognitionRef.current) return;
+          try {
+            recognitionRef.current.start();
+          } catch {
+            /* chờ onend thử lại */
+          }
+        }, retryMs);
       }
     }, delayMs);
   }, []);
@@ -312,8 +326,7 @@ export function TranslatorApp() {
   );
 
   const startRecognition = useCallback(async () => {
-    if (!isSpeechRecognitionSupported()) {
-      setSupported(false);
+    if (!speechSupported) {
       setError("Dùng Chrome trên Android để nhận dạng giọng nói.");
       return;
     }
@@ -366,7 +379,7 @@ export function TranslatorApp() {
       setError(e instanceof Error ? e.message : "Không bật được micro");
       stopListening();
     }
-  }, [bindRecognitionHandlers, refreshAudioOutput, stopListening]);
+  }, [bindRecognitionHandlers, refreshAudioOutput, speechSupported, stopListening]);
 
   const toggleListening = useCallback(() => {
     if (listening) {
@@ -405,11 +418,6 @@ export function TranslatorApp() {
   );
 
   useEffect(() => {
-    setMounted(true);
-    const loaded = loadAudioSettings();
-    setAudioSettings(loaded);
-    audioSettingsRef.current = loaded;
-    setSupported(isSpeechRecognitionSupported());
     prepareVoices();
     void warmTranslators();
   }, []);
@@ -540,7 +548,7 @@ export function TranslatorApp() {
         <button
           type="button"
           onClick={toggleListening}
-          disabled={mounted && !supported}
+          disabled={isClient && !speechSupported}
           aria-pressed={listening}
           aria-label={listening ? "Tắt nghe" : "Bật nghe và dịch"}
           className={`relative flex h-40 w-40 items-center justify-center rounded-full text-xl font-semibold shadow-lg transition-all active:scale-95 disabled:opacity-40 ${
@@ -587,7 +595,7 @@ export function TranslatorApp() {
         <p className="max-w-md text-center text-sm text-amber-400/90" role="alert">
           {error}
         </p>
-      ) : mounted && !supported ? (
+      ) : isClient && !speechSupported ? (
         <p className="max-w-md text-center text-sm text-amber-400/90">
           Cần Chrome hoặc Edge trên điện thoại Android để dùng micro.
         </p>

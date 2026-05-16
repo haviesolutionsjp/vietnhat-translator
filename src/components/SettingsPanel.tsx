@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 import {
   DEFAULT_AUDIO_SETTINGS,
   type AudioSettings,
@@ -23,21 +23,11 @@ export function SettingsPanel({
   onClose,
   onChange,
 }: Props) {
-  const [draft, setDraft] = useState(settings);
-
-  useEffect(() => {
-    if (open) setDraft(settings);
-  }, [open, settings]);
-
   const patch = useCallback(
     (partial: Partial<AudioSettings>) => {
-      setDraft((prev) => {
-        const next = { ...prev, ...partial };
-        onChange(next);
-        return next;
-      });
+      onChange({ ...settings, ...partial });
     },
-    [onChange],
+    [onChange, settings],
   );
 
   if (!open) return null;
@@ -71,12 +61,12 @@ export function SettingsPanel({
         <section className="mb-6 space-y-3">
           <h3 className="text-sm font-medium text-zinc-300">Tai nghe & phát âm</h3>
           <SpeechPlaybackPicker
-            mode={draft.playbackMode}
+            mode={settings.playbackMode}
             headphonesConnected={headphonesConnected}
             onChange={(mode) => patch({ playbackMode: mode })}
           />
           <p className="text-xs text-zinc-600">
-            {speechPlaybackHint(draft.playbackMode, headphonesConnected)}
+            {speechPlaybackHint(settings.playbackMode, headphonesConnected)}
           </p>
         </section>
 
@@ -84,7 +74,7 @@ export function SettingsPanel({
           <h3 className="text-sm font-medium text-zinc-300">Âm lượng đọc (bản dịch)</h3>
           <SliderField
             label="Âm lượng"
-            value={draft.ttsVolume}
+            value={settings.ttsVolume}
             min={30}
             max={100}
             unit="%"
@@ -92,7 +82,7 @@ export function SettingsPanel({
           />
           <SliderField
             label="Tốc độ đọc"
-            value={draft.ttsSpeed}
+            value={settings.ttsSpeed}
             min={70}
             max={130}
             unit="%"
@@ -101,7 +91,7 @@ export function SettingsPanel({
           <ToggleRow
             label="Tiếng Nhật rõ hơn"
             description="Chậm và rõ hơn khi đọc tiếng Nhật"
-            checked={draft.japaneseClarity}
+            checked={settings.japaneseClarity}
             onChange={(japaneseClarity) => patch({ japaneseClarity })}
           />
         </section>
@@ -117,29 +107,29 @@ export function SettingsPanel({
           <ToggleRow
             label="Khử ồn môi trường"
             description="Giảm tiếng ồn nền qua micro"
-            checked={draft.noiseSuppression}
+            checked={settings.noiseSuppression}
             onChange={(noiseSuppression) => patch({ noiseSuppression })}
           />
           <ToggleRow
             label="Loại tiếng vọng"
-            checked={draft.echoCancellation}
+            checked={settings.echoCancellation}
             onChange={(echoCancellation) => patch({ echoCancellation })}
           />
           <ToggleRow
             label="Tự chỉnh âm lượng micro"
-            checked={draft.autoGainControl}
+            checked={settings.autoGainControl}
             onChange={(autoGainControl) => patch({ autoGainControl })}
           />
           <ToggleRow
             label="Lọc âm trầm & ồn nền"
             description="Cắt tiếng ồn tần thấp, nén âm thanh"
-            checked={draft.ambientNoiseFilter}
+            checked={settings.ambientNoiseFilter}
             onChange={(ambientNoiseFilter) => patch({ ambientNoiseFilter })}
           />
-          {draft.ambientNoiseFilter ? (
+          {settings.ambientNoiseFilter ? (
             <SliderField
               label="Mức lọc tiếng ồn"
-              value={draft.noiseFilterStrength}
+              value={settings.noiseFilterStrength}
               min={0}
               max={100}
               unit="%"
