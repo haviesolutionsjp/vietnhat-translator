@@ -35,6 +35,10 @@ export function listenHint(direction: Direction): string {
     : "Đang nghe tiếng Nhật";
 }
 
+export function targetLangName(direction: Direction): string {
+  return direction === "vi-ja" ? "tiếng Nhật" : "tiếng Việt";
+}
+
 /** Phát hiện ngôn ngữ nguồn từ transcript để chọn chiều dịch */
 export function detectDirection(text: string): Direction {
   const trimmed = text.trim();

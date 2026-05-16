@@ -2,11 +2,11 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { DirectionPicker } from "@/components/DirectionPicker";
+import { TargetSpeech } from "@/components/TargetSpeech";
 import {
   listenHint,
   resolveDirection,
   sourceLang,
-  targetLang,
   type Direction,
   type DirectionMode,
 } from "@/lib/lang";
@@ -22,7 +22,7 @@ import {
   translateText,
   warmTranslators,
 } from "@/lib/translate";
-import { cancelSpeech, speakTranslation } from "@/lib/tts";
+import { cancelSpeech, prepareVoices, speakForDirection } from "@/lib/tts";
 
 type Status = "idle" | "listening" | "translating" | "speaking";
 
@@ -47,6 +47,7 @@ export function TranslatorApp() {
   const [listening, setListening] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [lastTranslation, setLastTranslation] = useState("");
+  const [lastSpeakDirection, setLastSpeakDirection] = useState<Direction>("vi-ja");
   const [error, setError] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
   const [supported, setSupported] = useState(false);
@@ -139,10 +140,11 @@ export function TranslatorApp() {
 
       lastTranslatedRef.current = trimmed;
       lastTranslatedDirRef.current = direction;
+      setLastSpeakDirection(direction);
       setLastTranslation(translated);
       setStatus("speaking");
       cancelSpeech();
-      await speakTranslation(translated, targetLang(direction));
+      await speakForDirection(translated, direction);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Không dịch được");
     } finally {
@@ -319,6 +321,7 @@ export function TranslatorApp() {
       cancelSpeech();
       return;
     }
+    prepareVoices();
     setLastTranslation("");
     lastTranslatedRef.current = "";
     lastTranslatedDirRef.current = null;
@@ -351,6 +354,7 @@ export function TranslatorApp() {
   useEffect(() => {
     setMounted(true);
     setSupported(isSpeechRecognitionSupported());
+    prepareVoices();
     void warmTranslators();
   }, []);
 
@@ -440,15 +444,19 @@ export function TranslatorApp() {
         </button>
 
         {lastTranslation ? (
-          <p
-            className="max-w-sm text-center text-base text-zinc-400"
-            aria-live="polite"
-          >
-            {lastTranslation}
-          </p>
+          <TargetSpeech
+            text={lastTranslation}
+            direction={lastSpeakDirection}
+            speaking={status === "speaking"}
+            onSpeakingChange={(speaking) => {
+              if (speaking) setStatus("speaking");
+              else if (listeningRef.current) setStatus("listening");
+              else setStatus("idle");
+            }}
+          />
         ) : (
           <p className="max-w-xs text-center text-xs text-zinc-600">
-            Bản dịch đọc tự động · chọn chiều hoặc Tự động
+            Bản dịch sẽ đọc tự động · chạm Nghe để phát lại
           </p>
         )}
       </main>
