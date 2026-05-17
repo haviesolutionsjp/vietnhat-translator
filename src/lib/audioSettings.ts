@@ -4,9 +4,9 @@ export type AudioSettings = {
   playbackMode: SpeechPlaybackMode;
   /** 0–1 */
   ttsVolume: number;
-  /** 0.7–1.4 */
+  /** 0.7–1.6 */
   ttsRate: number;
-  /** TTS tiếng Nhật chậm & rõ hơn */
+  /** TTS tiếng Nhật rõ hơn (không làm chậm) */
   jaClarityBoost: boolean;
   micNoiseSuppression: boolean;
   micEchoCancellation: boolean;
@@ -22,7 +22,7 @@ const STORAGE_KEY = "vietnhat-audio-settings";
 export const DEFAULT_AUDIO_SETTINGS: AudioSettings = {
   playbackMode: "headphones",
   ttsVolume: 1,
-  ttsRate: 1,
+  ttsRate: 1.18,
   jaClarityBoost: true,
   micNoiseSuppression: true,
   micEchoCancellation: true,
@@ -57,7 +57,7 @@ function normalize(raw: Partial<AudioSettings>): AudioSettings {
     ttsRate: clamp(
       typeof raw.ttsRate === "number" ? raw.ttsRate : DEFAULT_AUDIO_SETTINGS.ttsRate,
       0.7,
-      1.4,
+      1.6,
     ),
     jaClarityBoost:
       typeof raw.jaClarityBoost === "boolean"

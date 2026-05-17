@@ -1,7 +1,8 @@
 "use client";
 
+import { useCallback } from "react";
 import { targetLangName, type Direction } from "@/lib/lang";
-import { cancelSpeech, speakForDirection } from "@/lib/tts";
+import { speakForDirection } from "@/lib/tts";
 
 type Props = {
   text: string;
@@ -18,13 +19,16 @@ export function TargetSpeech({
 }: Props) {
   const langLabel = targetLangName(direction);
 
-  const play = () => {
+  const play = useCallback(() => {
     if (!text.trim()) return;
     onSpeakingChange(true);
-    cancelSpeech();
-    speakForDirection(text, direction);
-    window.setTimeout(() => onSpeakingChange(false), 400);
-  };
+    void speakForDirection(text, direction).then((ok) => {
+      onSpeakingChange(false);
+      if (!ok) {
+        onSpeakingChange(false);
+      }
+    });
+  }, [direction, onSpeakingChange, text]);
 
   return (
     <div className="flex w-full max-w-sm flex-col items-center gap-3">

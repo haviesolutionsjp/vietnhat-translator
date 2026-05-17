@@ -80,16 +80,16 @@ export function SettingsSheet({
               onChange={(v) => patch({ ttsVolume: v / 100 })}
             />
             <Slider
-              label="Tốc độ phát âm"
+              label="Tốc độ đọc"
               value={Math.round(settings.ttsRate * 100)}
-              min={70}
-              max={140}
+              min={80}
+              max={160}
               unit="%"
               onChange={(v) => patch({ ttsRate: v / 100 })}
             />
             <Toggle
               label="Nghe tiếng Nhật rõ hơn"
-              description="Giọng đọc chậm và sáng hơn khi phát tiếng Nhật"
+              description="Tăng nhẹ cao độ giọng khi đọc tiếng Nhật"
               checked={settings.jaClarityBoost}
               onChange={(jaClarityBoost) => patch({ jaClarityBoost })}
             />

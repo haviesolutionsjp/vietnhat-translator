@@ -31,7 +31,7 @@ function loadVoices(): Promise<SpeechSynthesisVoice[]> {
     };
     pick();
     speechSynthesis.onvoiceschanged = pick;
-    setTimeout(() => resolve(speechSynthesis.getVoices()), 400);
+    setTimeout(() => resolve(speechSynthesis.getVoices()), 250);
   });
 
   return voicesReady;
@@ -86,54 +86,104 @@ function applyUtteranceSettings(
 
   const audio = getAudioSettings();
   const isJa = langCode.toLowerCase().startsWith("ja");
-  const baseRate = clamp(audio.ttsRate, 0.7, 1.4);
+  const baseRate = clamp(audio.ttsRate, 0.7, 1.6);
 
   utterance.volume = audio.ttsVolume;
   if (isJa && audio.jaClarityBoost) {
-    utterance.rate = clamp(baseRate * 0.92, 0.1, 10);
-    utterance.pitch = 1.05;
+    utterance.rate = clamp(baseRate * 1.05, 0.1, 10);
+    utterance.pitch = 1.04;
   } else {
-    utterance.rate = clamp(isJa ? baseRate * 0.97 : baseRate, 0.1, 10);
+    utterance.rate = clamp(baseRate, 0.1, 10);
     utterance.pitch = 1;
   }
 }
 
-/** Phát âm ngay — không chờ hết câu đọc để cập nhật UI */
+/** Chrome cần khoảng trống ngắn sau cancel() trước speak() */
+const CANCEL_TO_SPEAK_MS = 40;
+
+function flushSpeak(
+  gen: number,
+  utterance: SpeechSynthesisUtterance,
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (gen !== speakGeneration) {
+      resolve(false);
+      return;
+    }
+
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled || gen !== speakGeneration) return;
+      settled = true;
+      resolve(ok);
+    };
+
+    utterance.onstart = () => finish(true);
+    utterance.onend = () => finish(true);
+    utterance.onerror = (event) => {
+      if (event.error === "canceled") {
+        finish(false);
+        return;
+      }
+      finish(false);
+    };
+
+    try {
+      speechSynthesis.speak(utterance);
+    } catch {
+      finish(false);
+      return;
+    }
+
+    window.setTimeout(() => {
+      if (settled || gen !== speakGeneration) return;
+      if (speechSynthesis.speaking || speechSynthesis.pending) {
+        finish(true);
+      }
+    }, 120);
+  });
+}
+
+/**
+ * Phát âm bản dịch. Trả Promise để UI biết khi nào xong / lỗi.
+ */
 export function speakTranslation(
   text: string,
   langCode: string,
-): boolean {
+): Promise<boolean> {
   const trimmed = text.trim();
-  if (!trimmed || !isTTSSupported()) return false;
+  if (!trimmed || !isTTSSupported()) return Promise.resolve(false);
 
   const gen = ++speakGeneration;
-  speechSynthesis.cancel();
-  if (speechSynthesis.paused) speechSynthesis.resume();
 
-  const startSpeak = (voices: SpeechSynthesisVoice[]) => {
-    if (gen !== speakGeneration) return;
+  const run = async (): Promise<boolean> => {
+    if (gen !== speakGeneration) return false;
+
+    speechSynthesis.cancel();
+    if (speechSynthesis.paused) speechSynthesis.resume();
+
+    await new Promise((r) => window.setTimeout(r, CANCEL_TO_SPEAK_MS));
+    if (gen !== speakGeneration) return false;
+
+    let voices = speechSynthesis.getVoices();
+    if (voices.length === 0) {
+      voices = await loadVoices();
+    }
+    if (gen !== speakGeneration) return false;
 
     const utterance = new SpeechSynthesisUtterance(trimmed);
     applyUtteranceSettings(utterance, langCode, pickVoice(voices, langCode));
 
-    utterance.onerror = () => {
-      /* bỏ qua — có thể bị cancel bởi câu mới */
-    };
-
-    speechSynthesis.speak(utterance);
+    return flushSpeak(gen, utterance);
   };
 
-  const cached = speechSynthesis.getVoices();
-  if (cached.length > 0) {
-    startSpeak(cached);
-    return true;
-  }
-
-  void loadVoices().then((voices) => startSpeak(voices));
-  return true;
+  return run();
 }
 
-export function speakForDirection(text: string, direction: Direction): boolean {
+export function speakForDirection(
+  text: string,
+  direction: Direction,
+): Promise<boolean> {
   return speakTranslation(text, targetLang(direction));
 }
 

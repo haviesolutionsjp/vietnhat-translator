@@ -176,7 +176,7 @@ export function TranslatorApp() {
     (
       translated: string,
       direction: Direction,
-      opts?: { force?: boolean },
+      opts?: { force?: boolean; final?: boolean },
     ) => {
       if (
         !opts?.force &&
@@ -187,12 +187,18 @@ export function TranslatorApp() {
       ) {
         return;
       }
-      if (translated === lastSpokenTranslationRef.current) return;
+
+      const sameAsLast = translated === lastSpokenTranslationRef.current;
+      if (sameAsLast && !opts?.final) return;
 
       lastSpokenTranslationRef.current = translated;
       setStatus("speaking");
-      cancelSpeech();
-      speakForDirection(translated, direction);
+
+      void speakForDirection(translated, direction).then((ok) => {
+        if (!ok && listeningRef.current) {
+          setStatus("listening");
+        }
+      });
     },
     [],
   );
@@ -241,10 +247,11 @@ export function TranslatorApp() {
 
         playTranslation(translated, direction, {
           force: Boolean(opts?.forceSpeak),
+          final: Boolean(opts?.final),
         });
 
-        if (listeningRef.current) {
-          setStatus(willAutoSpeak ? "speaking" : "listening");
+        if (listeningRef.current && !willAutoSpeak) {
+          setStatus("listening");
         }
       } catch (e) {
         if (gen !== translateGenRef.current) return;
@@ -506,11 +513,13 @@ export function TranslatorApp() {
       const dir = lastTranslatedDirRef.current;
       if (text && dir) {
         void (async () => {
-          setStatus("speaking");
-          cancelSpeech();
-          speakForDirection(text, dir);
-          if (listeningRef.current) setStatus("speaking");
-          else setStatus("idle");
+          void speakForDirection(text, dir).then((ok) => {
+            if (listeningRef.current) {
+              setStatus(ok ? "speaking" : "listening");
+            } else {
+              setStatus("idle");
+            }
+          });
         })();
       }
     }
