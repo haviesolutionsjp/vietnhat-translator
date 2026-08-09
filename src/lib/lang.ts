@@ -2,7 +2,7 @@ export type Direction = "vi-ja" | "ja-vi";
 export type DirectionMode = Direction | "auto";
 
 const JA_SCRIPT =
-  /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF\u3000-\u303F]/;
+  /[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF\u3400-\u4DBF\u3000-\u303F\uFF65-\uFF9F]/;
 
 export function sourceLang(direction: Direction): string {
   return direction === "vi-ja" ? "vi-VN" : "ja-JP";
@@ -46,17 +46,16 @@ export function detectDirection(text: string): Direction {
 
   const jaMatches = trimmed.match(new RegExp(JA_SCRIPT.source, "gu"));
   const jaCount = jaMatches?.length ?? 0;
-  const letterCount = trimmed.replace(/\s/g, "").length || 1;
-  const jaRatio = jaCount / letterCount;
 
-  if (jaRatio >= 0.15) return "ja-vi";
+  // Nếu có ký tự tiếng Nhật (Hiragana, Katakana, Kanji), nguồn là tiếng Nhật -> dịch sang tiếng Việt
+  if (jaCount > 0) return "ja-vi";
   return "vi-ja";
 }
 
 /** Gộp chế độ cố định hoặc tự động thành chiều dịch thực tế */
 export function resolveDirection(
-  mode: DirectionMode,
-  sourceText: string,
+  mode: DirectionMode = "auto",
+  sourceText: string = "",
 ): Direction {
   if (mode === "auto") return detectDirection(sourceText);
   return mode;

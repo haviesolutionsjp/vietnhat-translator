@@ -9,15 +9,28 @@ const translatorInflight = new Map<Direction, Promise<TranslatorInstance | null>
 const translatorUnavailableUntil = new Map<Direction, number>();
 const resultCache = new Map<string, string>();
 const resultInflight = new Map<string, Promise<string>>();
-const MAX_CACHE = 80;
+const MAX_CACHE = 100;
 
-const CHROME_EARLY_WAIT_MS = 140;
-const MYMEMORY_HEDGE_DELAY_MS = 80;
+const CHROME_EARLY_WAIT_MS = 120;
 const TRANSLATOR_UNAVAILABLE_RETRY_MS = 45_000;
 const TRANSLATOR_CREATE_RETRY_MS = 8_000;
 
 function cacheKey(direction: Direction, text: string): string {
-  return `${direction}\0${text}`;
+  return `${direction}\0${text.trim().toLowerCase()}`;
+}
+
+function decodeHtmlEntities(text: string): string {
+  const map: Record<string, string> = {
+    "&quot;": '"',
+    "&amp;": "&",
+    "&apos;": "'",
+    "&#39;": "'",
+    "&#039;": "'",
+    "&lt;": "<",
+    "&gt;": ">",
+    "&nbsp;": " ",
+  };
+  return text.replace(/&(quot|amp|apos|#39|#039|lt|gt|nbsp);/g, (match) => map[match] || match);
 }
 
 function remember(direction: Direction, source: string, translated: string): string {
@@ -26,8 +39,9 @@ function remember(direction: Direction, source: string, translated: string): str
     const first = resultCache.keys().next().value;
     if (first) resultCache.delete(first);
   }
-  resultCache.set(key, translated);
-  return translated;
+  const cleaned = decodeHtmlEntities(translated).trim();
+  resultCache.set(key, cleaned);
+  return cleaned;
 }
 
 function wait(ms: number): Promise<void> {
@@ -41,6 +55,7 @@ function blockTranslator(direction: Direction, durationMs: number): void {
 async function getChromeTranslator(
   direction: Direction,
 ): Promise<TranslatorInstance | null> {
+  if (typeof window === "undefined") return null;
   const Translator = window.Translator;
   if (!Translator) return null;
 
@@ -91,12 +106,47 @@ async function translateChrome(
   const chrome = await getChromeTranslator(direction);
   if (!chrome) return null;
   try {
-    return (await chrome.translate(text)).trim();
+    const res = (await chrome.translate(text)).trim();
+    return res || null;
   } catch {
     return null;
   }
 }
 
+/** Google Translate endpoint (ultra-fast, highly accurate for VN ↔ JA) */
+async function translateGoogle(
+  text: string,
+  direction: Direction,
+): Promise<string> {
+  const { source, target } = translatorCodes(direction);
+  const url = new URL("https://translate.googleapis.com/translate_a/single");
+  url.searchParams.set("client", "gtx");
+  url.searchParams.set("sl", source);
+  url.searchParams.set("tl", target);
+  url.searchParams.set("dt", "t");
+  url.searchParams.set("q", text);
+
+  const res = await fetch(url.toString(), {
+    signal: AbortSignal.timeout(4_000),
+  });
+  if (!res.ok) throw new Error("Google dịch không khả dụng");
+
+  const data = (await res.json()) as unknown;
+  if (!Array.isArray(data) || !Array.isArray(data[0])) {
+    throw new Error("Dữ liệu dịch không hợp lệ");
+  }
+
+  const sentences = data[0] as Array<[string | null, ...unknown[]]>;
+  const translated = sentences
+    .map((item) => (item && typeof item[0] === "string" ? item[0] : ""))
+    .join("")
+    .trim();
+
+  if (!translated) throw new Error("Không nhận được bản dịch");
+  return decodeHtmlEntities(translated);
+}
+
+/** MyMemory API Fallback */
 async function translateMyMemory(
   text: string,
   direction: Direction,
@@ -107,15 +157,22 @@ async function translateMyMemory(
   url.searchParams.set("langpair", pair);
 
   const res = await fetch(url.toString(), {
-    signal: AbortSignal.timeout(4_500),
+    signal: AbortSignal.timeout(4_000),
   });
   if (!res.ok) throw new Error("Dịch thất bại");
   const data = (await res.json()) as {
     responseData?: { translatedText?: string };
+    responseStatus?: number;
   };
   const translated = data.responseData?.translatedText?.trim();
-  if (!translated) throw new Error("Không nhận được bản dịch");
-  return translated;
+  if (
+    !translated ||
+    translated.startsWith("MYMEMORY WARNING:") ||
+    translated.includes("LIMIT REACHED")
+  ) {
+    throw new Error("Không nhận được bản dịch MyMemory");
+  }
+  return decodeHtmlEntities(translated);
 }
 
 export async function translateText(
@@ -133,38 +190,37 @@ export async function translateText(
   if (inflight) return inflight;
 
   const task = (async (): Promise<string> => {
+    // 1. Check Chrome on-device Translator first if available
     const chromeFast = translateChrome(trimmed, direction);
-    const chromeResult = await Promise.race([
+    const chromeEarly = await Promise.race([
       chromeFast,
       wait(CHROME_EARLY_WAIT_MS).then(() => null as string | null),
     ]);
-
-    if (chromeResult) {
-      return remember(direction, trimmed, chromeResult);
+    if (chromeEarly) {
+      return remember(direction, trimmed, chromeEarly);
     }
 
-    const myMemoryHedged = wait(MYMEMORY_HEDGE_DELAY_MS)
-      .then(() => translateMyMemory(trimmed, direction))
-      .catch(() => null as string | null);
-
-    const firstWinner = await Promise.race([chromeFast, myMemoryHedged]);
-    if (firstWinner) {
-      return remember(direction, trimmed, firstWinner);
+    // 2. Primary cloud translation: Google Translate GTX (fastest and most accurate for JA-VI)
+    try {
+      const gResult = await translateGoogle(trimmed, direction);
+      if (gResult) return remember(direction, trimmed, gResult);
+    } catch {
+      /* Fallback to secondary */
     }
 
-    const [lateChrome, hedgedMemory] = await Promise.all([
-      chromeFast,
-      myMemoryHedged,
-    ]);
+    // 3. Fallback to late Chrome if finished
+    const lateChrome = await chromeFast;
     if (lateChrome) {
       return remember(direction, trimmed, lateChrome);
     }
-    if (hedgedMemory) {
-      return remember(direction, trimmed, hedgedMemory);
-    }
 
-    const mm = await translateMyMemory(trimmed, direction);
-    return remember(direction, trimmed, mm);
+    // 4. Secondary fallback: MyMemory
+    try {
+      const mm = await translateMyMemory(trimmed, direction);
+      return remember(direction, trimmed, mm);
+    } catch {
+      throw new Error("Không thể dịch vào lúc này. Kiểm tra kết nối mạng.");
+    }
   })();
 
   resultInflight.set(key, task);
@@ -175,7 +231,7 @@ export async function translateText(
   }
 }
 
-/** Khởi tạo sẵn cả hai chiều (Chrome Translator) */
+/** Khởi tạo sẵn cả hai chiều (Chrome Translator nếu có) */
 export async function warmTranslators(): Promise<void> {
   await Promise.all([
     getChromeTranslator("vi-ja"),
