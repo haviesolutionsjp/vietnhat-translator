@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { DirectionPicker } from "@/components/DirectionPicker";
 import { SettingsSheet } from "@/components/SettingsSheet";
 import { TargetSpeech } from "@/components/TargetSpeech";
@@ -43,11 +43,22 @@ const INTERIM_MIN_CHARS = 2;
 const AUTO_SEGMENT_SPEAK_MS = 3_500;
 const AUTO_SEGMENT_MIN_CHARS = 2;
 
+const emptySubscribe = () => () => {};
+
+function useIsMounted() {
+  return useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false,
+  );
+}
+
 function minCharsFor(direction: Direction): number {
   return direction === "ja-vi" ? 1 : INTERIM_MIN_CHARS;
 }
 
 export function TranslatorApp() {
+  const mounted = useIsMounted();
   const [detectedDirection, setDetectedDirection] = useState<Direction | null>(null);
   const [listening, setListening] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
@@ -55,14 +66,18 @@ export function TranslatorApp() {
   const [lastTranslation, setLastTranslation] = useState("");
   const [lastTranslateLatencyMs, setLastTranslateLatencyMs] = useState<number | null>(null);
   const [lastSpeakDirection, setLastSpeakDirection] = useState<Direction>("vi-ja");
-  const [audioSettings, setAudioSettings] = useState<AudioSettings>(DEFAULT_AUDIO_SETTINGS);
+  const [audioSettings, setAudioSettings] = useState<AudioSettings>(() => {
+    if (typeof window !== "undefined") {
+      return loadAudioSettings();
+    }
+    return DEFAULT_AUDIO_SETTINGS;
+  });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [textInputOpen, setTextInputOpen] = useState(false);
   const [manualText, setManualText] = useState("");
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [mounted, setMounted] = useState(false);
-  const [supported, setSupported] = useState(true);
+  const supported = typeof window !== "undefined" ? isSpeechRecognitionSupported() : true;
 
   const {
     headphonesConnected,
@@ -90,10 +105,21 @@ export function TranslatorApp() {
   const lastAutoSpokenSourceRef = useRef("");
   const autoSpeakTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  detectedRef.current = detectedDirection;
-  listeningRef.current = listening;
-  audioSettingsRef.current = audioSettings;
-  headphonesRef.current = headphonesConnected;
+  useEffect(() => {
+    detectedRef.current = detectedDirection;
+  }, [detectedDirection]);
+
+  useEffect(() => {
+    listeningRef.current = listening;
+  }, [listening]);
+
+  useEffect(() => {
+    audioSettingsRef.current = audioSettings;
+  }, [audioSettings]);
+
+  useEffect(() => {
+    headphonesRef.current = headphonesConnected;
+  }, [headphonesConnected]);
 
   const stopListening = useCallback(() => {
     listeningRef.current = false;
@@ -454,10 +480,6 @@ export function TranslatorApp() {
   }, [lastTranslation]);
 
   useEffect(() => {
-    setMounted(true);
-    const loaded = loadAudioSettings();
-    setAudioSettings(loaded);
-    setSupported(isSpeechRecognitionSupported());
     prepareVoices();
     void warmTranslators();
   }, []);

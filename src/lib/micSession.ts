@@ -1,7 +1,6 @@
 import {
   getAudioSettings,
   micSettingsForSource,
-  type AudioSettings,
 } from "@/lib/audioSettings";
 
 let mediaStream: MediaStream | null = null;
