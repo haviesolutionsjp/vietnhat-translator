@@ -115,26 +115,25 @@ export function TranslatorApp() {
     recognitionRef.current = null;
   }, []);
 
+  const scheduleRestartRef = useRef<(delayMs: number) => void>(() => {});
+
   const scheduleRecognitionRestart = useCallback((delayMs: number) => {
-    if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
-    restartTimeoutRef.current = setTimeout(() => {
-      if (!listeningRef.current || !recognitionRef.current) return;
-      try {
-        recognitionRef.current.start();
-      } catch {
-        scheduleRecognitionRestart(Math.min(delayMs * 2, 3000));
-      }
-    }, delayMs);
+    scheduleRestartRef.current(delayMs);
   }, []);
 
-  const applyRecognitionLang = useCallback(
-    (recognition: SpeechRecognition, lang: string) => {
-      if (recognition.lang !== lang) {
-        recognition.lang = lang;
-      }
-    },
-    [],
-  );
+  useEffect(() => {
+    scheduleRestartRef.current = (delayMs: number) => {
+      if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
+      restartTimeoutRef.current = setTimeout(() => {
+        if (!listeningRef.current || !recognitionRef.current) return;
+        try {
+          recognitionRef.current.start();
+        } catch {
+          scheduleRestartRef.current(Math.min(delayMs * 2, 3000));
+        }
+      }, delayMs);
+    };
+  }, []);
 
   const maybeSwitchAutoLang = useCallback(
     (text: string) => {
@@ -147,11 +146,16 @@ export function TranslatorApp() {
       const recognition = recognitionRef.current;
       if (recognition && listeningRef.current) {
         const lang = sourceLang(resolved);
-        applyRecognitionLang(recognition, lang);
-        scheduleRecognitionRestart(400);
+        try {
+          recognition.lang = lang;
+          recognition.stop();
+        } catch {
+          /* ignore */
+        }
+        scheduleRecognitionRestart(200);
       }
     },
-    [applyRecognitionLang, scheduleRecognitionRestart],
+    [scheduleRecognitionRestart],
   );
 
   const playTranslation = useCallback(

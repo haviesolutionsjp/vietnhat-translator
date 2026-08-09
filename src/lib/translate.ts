@@ -175,11 +175,40 @@ async function translateMyMemory(
   return decodeHtmlEntities(translated);
 }
 
+const PHONETIC_MAP: Array<[RegExp, string]> = [
+  [/c[ôo][\s\-]ni[\s\-]chi[\s\-]w?a/gi, "こんにちは"],
+  [/con[\s\-]ni[\s\-]chi[\s\-]w?a/gi, "こんにちは"],
+  [/a[\s\-]ri[\s\-]ga[\s\-](t[ôo]|to)([\s\-]go[\s\-]zai[\s\-]ma[\s\-]s[uúíít]+)?/gi, "ありがとうございます"],
+  [/[sx][ưuy][\s\-]mi[\s\-]ma[\s\-][sx]en/gi, "すみません"],
+  [/[sx][ưuy][\s\-]ma[\s\-][sx]en/gi, "すみません"],
+  [/ô[\s\-](ha|hai|hay)[\s\-]ô/gi, "おはよう"],
+  [/g[ôo][\s\-]men([\s\-]na[\s\-]sai)?/gi, "ごめんなさい"],
+  [/[đd]a[i|z][\s\-](gi[ôo]|d[ôo]|z[ôo])[\s\-]bu/gi, "大丈夫"],
+  [/ô[\s\-]n[êe][\s\-]gai([\s\-]shi[\s\-]ma[\s\-]su)?/gi, "お願いします"],
+  [/[đd][ôo][\s\-]c[ôo][\s\-][đd][ée]t[\s\-]ca/gi, "どこですか"],
+  [/(c[ôo]|s[ôo]|a)[\s\-]r[êe][\s\-]qua/gi, "これは"],
+  [/qua[\s\-]ta[\s\-]shi/gi, "私"],
+  [/qua[\s\-]ca[\s\-]ri[\s\-]ma[\s\-](sen|s[íi]t|m[áa]t)/gi, "分かりません"],
+  [/[sx]a[yi][\s\-]ô[\s\-]na[\s\-]ra/gi, "さようなら"],
+  [/[íi]ch[\s\-]ku[\s\-]ra/gi, "いくら"],
+  [/ha[\s\-]di[\s\-]m[êe][\s\-]ma[\s\-][sx]i[\s\-]t[êe]/gi, "初めまして"],
+  [/[yd][ôo][\s\-]r[ôo][\s\-][sx]i[\s\-]ku/gi, "よろしく"],
+];
+
+function normalizeSource(text: string, direction: Direction): string {
+  if (direction !== "ja-vi") return text;
+  let normalized = text;
+  for (const [regex, replacement] of PHONETIC_MAP) {
+    normalized = normalized.replace(regex, replacement);
+  }
+  return normalized;
+}
+
 export async function translateText(
   text: string,
   direction: Direction,
 ): Promise<string> {
-  const trimmed = text.trim();
+  const trimmed = normalizeSource(text.trim(), direction);
   if (!trimmed) return "";
 
   const key = cacheKey(direction, trimmed);
