@@ -62,8 +62,17 @@ export function DirectionPicker({ activeDirection, listening }: Props) {
           </div>
         </div>
 
-        <div className="hidden sm:flex shrink-0 items-center gap-1 text-[11px] font-medium text-emerald-400 bg-emerald-950/50 border border-emerald-800/40 rounded-lg px-2.5 py-1">
-          <span>Auto 2 chiều</span>
+        <div className="flex shrink-0 items-center gap-1.5 text-[11px] font-medium rounded-lg px-2.5 py-1 transition-all border shadow-sm">
+          {listening ? (
+            <span className="flex items-center gap-1 text-red-400 bg-red-950/40 border-red-800/40">
+              <span className="h-1.5 w-1.5 rounded-full bg-red-500 animate-ping" />
+              Micro luôn bật
+            </span>
+          ) : (
+            <span className="text-emerald-400 bg-emerald-950/50 border-emerald-800/40">
+              Auto 2 chiều
+            </span>
+          )}
         </div>
       </div>
     </div>

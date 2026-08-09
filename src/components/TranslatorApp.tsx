@@ -77,7 +77,9 @@ export function TranslatorApp() {
   const [manualText, setManualText] = useState("");
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const supported = typeof window !== "undefined" ? isSpeechRecognitionSupported() : true;
+  const [supported, setSupported] = useState<boolean>(() =>
+    typeof window !== "undefined" ? isSpeechRecognitionSupported() : true,
+  );
 
   const {
     headphonesConnected,
@@ -104,6 +106,7 @@ export function TranslatorApp() {
   const latestTranscriptRef = useRef("");
   const lastAutoSpokenSourceRef = useRef("");
   const autoSpeakTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const bindHandlersRef = useRef<(rec: SpeechRecognition) => void>(() => {});
 
   useEffect(() => {
     detectedRef.current = detectedDirection;
@@ -121,6 +124,29 @@ export function TranslatorApp() {
     headphonesRef.current = headphonesConnected;
   }, [headphonesConnected]);
 
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+
+  const requestWakeLock = useCallback(async () => {
+    try {
+      if ("wakeLock" in navigator && !wakeLockRef.current) {
+        wakeLockRef.current = await navigator.wakeLock.request("screen");
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(() => {
+    try {
+      if (wakeLockRef.current) {
+        void wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      }
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   const stopListening = useCallback(() => {
     listeningRef.current = false;
     lastInterimTranslateAtRef.current = 0;
@@ -133,13 +159,14 @@ export function TranslatorApp() {
     if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
     if (autoSpeakTimerRef.current) clearInterval(autoSpeakTimerRef.current);
     autoSpeakTimerRef.current = null;
+    releaseWakeLock();
     try {
       recognitionRef.current?.abort();
     } catch {
       /* ignore */
     }
     recognitionRef.current = null;
-  }, []);
+  }, [releaseWakeLock]);
 
   const scheduleRestartRef = useRef<(delayMs: number) => void>(() => {});
 
@@ -151,15 +178,26 @@ export function TranslatorApp() {
     scheduleRestartRef.current = (delayMs: number) => {
       if (restartTimeoutRef.current) clearTimeout(restartTimeoutRef.current);
       restartTimeoutRef.current = setTimeout(() => {
-        if (!listeningRef.current || !recognitionRef.current) return;
+        if (!listeningRef.current) return;
         try {
-          recognitionRef.current.start();
+          try {
+            recognitionRef.current?.abort();
+          } catch {
+            /* ignore */
+          }
+          const dir: Direction = detectedRef.current || lastSpeakDirection || "vi-ja";
+          const rec = createRecognition(dir);
+          rec.lang = sourceLang(dir);
+          recognitionRef.current = rec;
+          bindHandlersRef.current(rec);
+          rec.start();
+          setStatus("listening");
         } catch {
-          scheduleRestartRef.current(Math.min(delayMs * 2, 3000));
+          scheduleRestartRef.current(Math.min(delayMs * 1.5, 2000));
         }
       }, delayMs);
     };
-  }, []);
+  }, [lastSpeakDirection]);
 
   const maybeSwitchAutoLang = useCallback(
     (text: string) => {
@@ -351,34 +389,29 @@ export function TranslatorApp() {
 
       recognition.onerror = (event: SpeechRecognitionErrorEvent) => {
         const code = event.error;
-        if (code === "aborted" || code === "no-speech") return;
+        if (code === "aborted" || code === "no-speech") {
+          if (listeningRef.current) {
+            scheduleRecognitionRestart(100);
+          }
+          return;
+        }
 
         if (isRetriableSpeechError(code) && listeningRef.current) {
           networkRetriesRef.current += 1;
-          const canRetry = networkRetriesRef.current <= 6;
+          const canRetry = networkRetriesRef.current <= 10;
           const msg = speechErrorMessage(code, canRetry);
           if (msg) setError(msg);
 
-          if (canRetry) {
-            try {
-              recognition.stop();
-            } catch {
-              /* ignore */
-            }
-            scheduleRecognitionRestart(
-              Math.min(400 * networkRetriesRef.current, 2500),
-            );
-            return;
-          }
-
-          stopListening();
+          scheduleRecognitionRestart(
+            Math.min(300 * networkRetriesRef.current, 2500),
+          );
           return;
         }
 
         if (code === "not-allowed" || code === "service-not-allowed") {
           setError(
             speechErrorMessage(code, false) ??
-              "Cần cấp quyền micro trong cài đặt trình duyệt để dùng giọng nói.",
+              "Cần cấp quyền micro trong cài đặt trình duyệt để dùng chế độ luôn nghe.",
           );
           stopListening();
           return;
@@ -386,17 +419,23 @@ export function TranslatorApp() {
 
         const message = speechErrorMessage(code, false);
         if (message) setError(message);
-        if (code !== "network") stopListening();
+        if (listeningRef.current && code !== "not-allowed") {
+          scheduleRecognitionRestart(500);
+        }
       };
 
       recognition.onend = () => {
-        if (listeningRef.current && recognitionRef.current) {
-          scheduleRecognitionRestart(250);
+        if (listeningRef.current) {
+          scheduleRecognitionRestart(80);
         }
       };
     },
     [scheduleRecognitionRestart, scheduleTranslation, stopListening],
   );
+
+  useEffect(() => {
+    bindHandlersRef.current = bindRecognitionHandlers;
+  }, [bindRecognitionHandlers]);
 
   const startRecognition = useCallback(() => {
     if (!isSpeechRecognitionSupported()) {
@@ -424,6 +463,7 @@ export function TranslatorApp() {
       bindRecognitionHandlers(recognition);
 
       recognition.start();
+      void requestWakeLock();
       void refreshAudioOutput();
       setListening(true);
       listeningRef.current = true;
@@ -441,7 +481,7 @@ export function TranslatorApp() {
       setError(e instanceof Error ? e.message : "Không bật được micro");
       stopListening();
     }
-  }, [bindRecognitionHandlers, lastSpeakDirection, refreshAudioOutput, stopListening]);
+  }, [bindRecognitionHandlers, lastSpeakDirection, refreshAudioOutput, requestWakeLock, stopListening]);
 
   const toggleListening = useCallback(() => {
     if (listening) {
@@ -578,15 +618,15 @@ export function TranslatorApp() {
   const statusLabel =
     status === "listening"
       ? detectedDirection
-        ? `${listenHint(detectedDirection)}…`
-        : "Đang nghe (tự nhận tiếng Việt hoặc Nhật)…"
+        ? `${listenHint(detectedDirection)}… (Micro luôn bật)`
+        : "Đang nghe liên tục (nói tiếng Việt hoặc tiếng Nhật)..."
       : status === "translating"
-        ? "Đang dịch…"
+        ? "Đang dịch realtime…"
         : status === "speaking"
-          ? "Đang đọc bản dịch…"
+          ? "Đang đọc bản dịch (vẫn tiếp tục nghe)…"
           : listening
-            ? "Đang nghe…"
-            : "Chạm nút micro để bắt đầu nói";
+            ? "Đang nghe liên tục…"
+            : "Chạm để bật micro luôn nghe";
 
   return (
     <div className="flex min-h-[100dvh] w-full flex-col items-center justify-between bg-[#0c0f14] text-zinc-100 px-4 py-4 sm:px-6 sm:py-6 selection:bg-emerald-500/30">
@@ -745,7 +785,7 @@ export function TranslatorApp() {
             type="button"
             onClick={toggleListening}
             aria-pressed={listening}
-            aria-label={listening ? "Tắt nghe" : "Bật micro để dịch giọng nói"}
+            aria-label={listening ? "Tạm dừng nghe" : "Bật chế độ micro luôn nghe"}
             className={`group relative flex h-36 w-36 sm:h-40 sm:w-40 flex-col items-center justify-center rounded-full text-xl font-bold shadow-2xl transition-all duration-300 active:scale-90 ${
               listening
                 ? "bg-gradient-to-tr from-red-600 to-rose-500 text-white shadow-red-900/60 ring-4 ring-red-500/40"
@@ -753,14 +793,16 @@ export function TranslatorApp() {
             }`}
           >
             {listening ? (
-              <div className="flex flex-col items-center gap-2">
+              <div className="flex flex-col items-center gap-1">
                 <MicActiveIcon />
-                <span className="text-sm font-semibold tracking-wide uppercase">Dừng</span>
+                <span className="text-xs sm:text-sm font-semibold tracking-wide uppercase">Đang Luôn Nghe</span>
+                <span className="text-[10px] text-red-200/80 font-normal">Chạm để dừng</span>
               </div>
             ) : (
-              <div className="flex flex-col items-center gap-2">
+              <div className="flex flex-col items-center gap-1">
                 <MicIcon />
-                <span className="text-base font-semibold tracking-wide">Nói & Dịch</span>
+                <span className="text-sm sm:text-base font-semibold tracking-wide">Bật Luôn Nghe</span>
+                <span className="text-[10px] text-emerald-100/80 font-normal">Micro luôn bật</span>
               </div>
             )}
           </button>
